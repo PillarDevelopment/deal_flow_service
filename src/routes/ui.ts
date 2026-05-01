@@ -159,6 +159,7 @@ function renderBrokerPage() {
           linear-gradient(180deg, rgba(255,255,255,0.94), rgba(255,250,240,0.92));
         box-shadow: 0 18px 60px rgba(58, 48, 30, 0.08);
         padding: 20px;
+        min-width: 0;
       }
       h1 {
         margin: 0;
@@ -172,7 +173,7 @@ function renderBrokerPage() {
       }
       .stats {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 10px;
         margin-top: 22px;
       }
@@ -283,9 +284,32 @@ function renderBrokerPage() {
       }
       .detail {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 380px;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
         gap: 18px;
         margin-top: 18px;
+        align-items: start;
+      }
+      .recipient-company-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) repeat(3, minmax(72px, auto)) 40px;
+        gap: 10px;
+        align-items: center;
+      }
+      .recipient-company-name {
+        min-width: 0;
+      }
+      .recipient-company-name strong {
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .recipient-company-metric {
+        text-align: right;
+      }
+      .recipient-toggle {
+        padding: 8px 0;
+        min-width: 40px;
       }
       .hidden { display: none !important; }
       .muted { color: var(--muted); }
@@ -293,8 +317,12 @@ function renderBrokerPage() {
         display: flex;
         gap: 8px;
         align-items: center;
+        flex-wrap: wrap;
       }
-      .row > * { flex: 1; }
+      .row > * {
+        flex: 1 1 0;
+        min-width: 0;
+      }
       .message {
         min-height: 20px;
         color: var(--muted);
@@ -308,6 +336,26 @@ function renderBrokerPage() {
         height: 1px;
         background: var(--line);
         margin: 4px 0;
+      }
+      @media (max-width: 1180px) {
+        .stats {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .detail {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 720px) {
+        .recipient-company-summary {
+          grid-template-columns: minmax(0, 1fr) repeat(2, minmax(64px, auto));
+        }
+        .recipient-company-metric {
+          text-align: left;
+        }
+        .recipient-toggle {
+          grid-column: 3;
+          justify-self: end;
+        }
       }
       @media (max-width: 980px) {
         .hero,
@@ -519,7 +567,11 @@ function renderBrokerPage() {
           state.activeCompanyRecipientsPage = 1;
           return;
         }
-        const existing = state.campaigns.find((item) => item.property_id === propertyId || item.property?.id === propertyId);
+        const existing = state.campaigns.find((item) =>
+          item.property_id === propertyId ||
+          item.property?.id === propertyId ||
+          (Array.isArray(item.property_ids) && item.property_ids.includes(propertyId)),
+        );
         if (existing) {
           state.selectedCampaignId = existing.id;
           state.activeCompanyRecipientsPage = 1;
@@ -594,7 +646,7 @@ function renderBrokerPage() {
         $("companyDirectoryCount").textContent = String(state.companyDirectoryTotal || 0);
         $("contactedCompaniesCount").textContent = String(state.contactedCompaniesTotal || 0);
         $("companyDirectorySummaryMeta").textContent = state.campaignsTotal
-          ? "Объектов в работе: " + state.campaignsTotal + ". Показано: " + state.campaigns.length + "."
+          ? "Объектов в работе: " + state.campaignsTotal + "."
           : "Активных объектов пока нет.";
         $("companyDirectoryList").innerHTML = state.campaigns.length
           ? state.campaigns.map((campaign) => {
@@ -713,12 +765,14 @@ function renderBrokerPage() {
           ? pageItems.map((company) => {
             const expanded = isRecipientCompanyExpanded(company);
             return '<div class="activity-row">' +
-              '<strong>' + escapeHtml(company.companyName || "") + '</strong>' +
-              '<div class="row">' +
-                '<span class="badge">первые письма: ' + escapeHtml(company.firstTouchCount || 0) + '</span>' +
-                '<span class="badge">follow-up: ' + escapeHtml(company.followUpCount || 0) + '</span>' +
-                '<span class="badge">email: ' + escapeHtml(company.uniqueEmailCount || 0) + '</span>' +
-                '<button class="btn" data-toggle-recipient-company="' + escapeHtml(recipientCompanyKey(company)) + '">' + (expanded ? '▾' : '▸') + '</button>' +
+              '<div class="recipient-company-summary">' +
+                '<div class="recipient-company-name">' +
+                  '<strong>' + escapeHtml(company.companyName || "") + '</strong>' +
+                '</div>' +
+                '<div class="small recipient-company-metric"><span class="muted">Первые</span><br><strong>' + escapeHtml(company.firstTouchCount || 0) + '</strong></div>' +
+                '<div class="small recipient-company-metric"><span class="muted">Follow-up</span><br><strong>' + escapeHtml(company.followUpCount || 0) + '</strong></div>' +
+                '<div class="small recipient-company-metric"><span class="muted">Email</span><br><strong>' + escapeHtml(company.uniqueEmailCount || 0) + '</strong></div>' +
+                '<button class="btn recipient-toggle" data-toggle-recipient-company="' + escapeHtml(recipientCompanyKey(company)) + '">' + (expanded ? '▾' : '▸') + '</button>' +
               '</div>' +
               (expanded
                 ? '<div class="recipient-list">' + (company.recipients || []).map((recipient) =>

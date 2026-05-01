@@ -181,6 +181,31 @@ type CompanyPlaybookRow = {
   updated_at: string;
 };
 
+type AggregatedObjectRow = {
+  id: string;
+  campaign_name: string;
+  property_id: string;
+  property_ids: string[];
+  property: PropertyIndexRow | null;
+  status: string;
+  objective: string;
+  updated_at: string;
+  stats?: ReturnType<typeof emptyCampaignStats>;
+  _stats?: Array<ReturnType<typeof emptyCampaignStats>>;
+};
+
+const OBJECT_ALIASES: Record<string, string> = {
+  Abbakumovo: "Аббакумово",
+  "Suvorovskaya 1/52 k1": "Офисное здание на Суворовской площади",
+  "Moskva 1905 goda 4s1": "Коммерческое помещение на ул. 1905 года",
+  "Michurinskiy 3": "Мичуринский проспект",
+  Pushkino: "Торговые помещения в Пушкино",
+  "Pushkino Yaroslavskoe 194k1": "Торговые помещения в Пушкино",
+  Stupino: "Ступино 12,97 га",
+  "Stupino / Staraya Sitnya": "Ступино 12,97 га",
+  Mozhaysk: "Можайск, 71,89 га",
+};
+
 export async function brokerApiRoutes(server: FastifyInstance) {
   server.addHook("preHandler", requireSuperAdmin);
 
@@ -362,7 +387,7 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       };
       const campaign = campaignsById.get(target.campaign_id);
       const property = campaign?.property_id ? propertiesById.get(campaign.property_id) : null;
-      const objectName = property?.title || campaign?.campaign_name || "";
+      const objectName = canonicalObjectTitle(property?.title || campaign?.campaign_name || "");
 
       if (isFirstTouchStatus(target.status)) item.firstTouchCount += 1;
       if (target.status === "followed_up") item.followUpCount += 1;
@@ -589,7 +614,7 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       };
       const campaign = campaignsById.get(target.campaign_id);
       const property = campaign?.property_id ? propertiesById.get(campaign.property_id) : null;
-      const objectName = property?.title || campaign?.campaign_name || "";
+      const objectName = canonicalObjectTitle(property?.title || campaign?.campaign_name || "");
       if (isFirstTouchStatus(target.status)) item.firstTouchCount += 1;
       if (target.status === "followed_up") item.followUpCount += 1;
       if (target.status === "replied") item.repliedCount += 1;
@@ -916,12 +941,11 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     const campaigns = data ?? [];
     const campaignIds = campaigns.map((item) => item.id).filter(Boolean);
     const statsByCampaignId = await loadCampaignTargetStats(server, campaignIds);
+    const propertiesById = await loadPropertiesIndex(server, unique(campaigns.map((item) => item.property_id).filter(Boolean)));
+    const grouped = groupCampaignsByObject(campaigns, propertiesById, statsByCampaignId);
     return {
-      items: campaigns.map((campaign) => ({
-        ...campaign,
-        stats: statsByCampaignId.get(campaign.id) || emptyCampaignStats(),
-      })),
-      total: count ?? campaigns.length,
+      items: grouped.slice(0, limit),
+      total: grouped.length > 0 ? grouped.length : (count ?? campaigns.length),
     };
   });
 
@@ -968,6 +992,13 @@ export async function brokerApiRoutes(server: FastifyInstance) {
   });
 
   server.get<{ Params: { id: string } }>("/campaigns/:id", async (request, reply) => {
+    if (request.params.id.startsWith("object:")) {
+      const detail = await loadObjectDetail(server, request.params.id.slice("object:".length));
+      if (!detail) {
+        return reply.status(404).send({ error: "Объект не найден" });
+      }
+      return detail;
+    }
     const detail = await loadCampaignDetail(server, request.params.id);
     if (!detail) {
       return reply.status(404).send({ error: "Кампания не найдена" });
@@ -1206,8 +1237,33 @@ function companyRegistryKey(companyName: string | null | undefined, email: strin
   return normalizeString(email, 240).toLowerCase();
 }
 
+function objectGroupKey(value: string | null | undefined) {
+  return canonicalObjectTitle(value).toLowerCase();
+}
+
+function stripHistoricalOutboundPrefix(value: string | null | undefined) {
+  return normalizeString(value, 240).replace(/^historical outbound:\s*/i, "").trim();
+}
+
+function canonicalObjectTitle(value: string | null | undefined) {
+  const stripped = stripHistoricalOutboundPrefix(value);
+  return OBJECT_ALIASES[stripped] || stripped;
+}
+
 function preferLongerName(left: string, right: string) {
   return normalizeString(right).length > normalizeString(left).length ? right : left;
+}
+
+function mergeCampaignStats(items: Array<ReturnType<typeof emptyCampaignStats>>) {
+  return items.reduce((acc, item) => ({
+    firstTouchCount: acc.firstTouchCount + Number(item.firstTouchCount || 0),
+    followUpCount: acc.followUpCount + Number(item.followUpCount || 0),
+    repliedCount: acc.repliedCount + Number(item.repliedCount || 0),
+    bouncedCount: acc.bouncedCount + Number(item.bouncedCount || 0),
+    suppressedCount: acc.suppressedCount + Number(item.suppressedCount || 0),
+    recipientCount: acc.recipientCount + Number(item.recipientCount || 0),
+    companyCount: acc.companyCount + Number(item.companyCount || 0),
+  }), emptyCampaignStats());
 }
 
 function isFirstTouchStatus(status: string) {
@@ -1296,12 +1352,88 @@ async function loadCampaignDetail(server: FastifyInstance, campaignId: string) {
 
   return {
     ...campaign,
+    campaign_name: canonicalObjectTitle(property?.title || campaign.campaign_name),
     property: property ?? null,
     brief: brief ?? null,
     hypotheses: hypotheses ?? [],
     stats,
     targetCompanies: companies,
     targets: targets ?? [],
+  };
+}
+
+async function loadObjectDetail(server: FastifyInstance, objectKey: string) {
+  const { data: campaigns, error } = await server.db
+    .from("broker_campaigns")
+    .select("*")
+    .order("updated_at", { ascending: false });
+  if (error) throw new Error(error.message);
+
+  const campaignRows = campaigns ?? [];
+  const propertiesById = await loadPropertiesIndex(server, unique(campaignRows.map((item) => item.property_id).filter(Boolean)));
+  const statsByCampaignId = await loadCampaignTargetStats(server, campaignRows.map((item) => item.id).filter(Boolean));
+  const grouped = groupCampaignsByObject(campaignRows, propertiesById, statsByCampaignId);
+  const objectSummary = grouped.find((item) => item.id === `object:${objectKey}`);
+  if (!objectSummary) return null;
+
+  const rawCampaigns = campaignRows.filter((campaign) =>
+    objectGroupKey(propertiesById.get(campaign.property_id)?.title || campaign.campaign_name) === objectKey,
+  );
+  const rawCampaignIds = rawCampaigns.map((item) => item.id).filter(Boolean);
+
+  const [
+    { data: briefs, error: briefsError },
+    { data: hypotheses, error: hypothesesError },
+    { data: targets, error: targetsError },
+  ] = await Promise.all([
+    server.db.from("broker_campaign_briefs").select("*").in("campaign_id", rawCampaignIds),
+    server.db
+      .from("broker_campaign_hypotheses")
+      .select("*")
+      .in("campaign_id", rawCampaignIds)
+      .order("priority", { ascending: false })
+      .order("created_at", { ascending: false }),
+    server.db
+      .from("broker_campaign_targets")
+      .select("id,campaign_id,company_name,contact_name,email,source,object_role,domain,status,created_at,updated_at")
+      .in("campaign_id", rawCampaignIds)
+      .order("company_name", { ascending: true })
+      .returns<CampaignTargetRow[]>(),
+  ]);
+
+  if (briefsError) throw new Error(briefsError.message);
+  if (hypothesesError) throw new Error(hypothesesError.message);
+  if (targetsError) throw new Error(targetsError.message);
+
+  const mergedTargets = targets ?? [];
+  const targetCompanies = Array.from(groupCampaignTargetsByCompany(mergedTargets).values())
+    .map((item) => ({
+      companyName: item.companyName,
+      firstTouchCount: item.firstTouchCount,
+      followUpCount: item.followUpCount,
+      uniqueEmailCount: item.uniqueEmails.size,
+      recipients: item.recipients.sort((a, b) => String(a.email || "").localeCompare(String(b.email || ""))),
+    }))
+    .sort((a, b) =>
+      (b.firstTouchCount + b.followUpCount) - (a.firstTouchCount + a.followUpCount) ||
+      a.companyName.localeCompare(b.companyName),
+    );
+
+  return {
+    id: objectSummary.id,
+    campaign_name: objectSummary.campaign_name,
+    property_id: objectSummary.property_id,
+    property_ids: objectSummary.property_ids,
+    campaign_ids: rawCampaignIds,
+    status: objectSummary.status,
+    objective: rawCampaigns.map((item) => normalizeString(item.objective, 4000)).filter(Boolean).join("\n\n"),
+    property: objectSummary.property,
+    brief: briefs?.[0] ?? null,
+    briefs: briefs ?? [],
+    hypotheses: hypotheses ?? [],
+    stats: summarizeCampaignTargets(mergedTargets),
+    targetCompanies,
+    targets: mergedTargets,
   };
 }
 
@@ -1363,6 +1495,66 @@ function groupCampaignTargetsByCompany(targets: CampaignTargetRow[]) {
   }
 
   return byCompany;
+}
+
+async function loadPropertiesIndex(server: FastifyInstance, propertyIds: string[]) {
+  const result = new Map<string, PropertyIndexRow>();
+  if (!propertyIds.length) return result;
+  const { data, error } = await server.db
+    .from("properties")
+    .select("id,title,address,region")
+    .in("id", propertyIds)
+    .returns<PropertyIndexRow[]>();
+  if (error) throw new Error(error.message);
+  for (const item of data || []) result.set(item.id, item);
+  return result;
+}
+
+function groupCampaignsByObject(
+  campaigns: Array<Record<string, unknown>>,
+  propertiesById: Map<string, PropertyIndexRow>,
+  statsByCampaignId: Map<string, ReturnType<typeof emptyCampaignStats>>,
+): AggregatedObjectRow[] {
+  const grouped = new Map<string, AggregatedObjectRow>();
+
+  for (const campaign of campaigns) {
+    const propertyId = String(campaign.property_id || "");
+    const property = propertyId ? propertiesById.get(propertyId) || null : null;
+    const canonicalTitle = canonicalObjectTitle(property?.title || String(campaign.campaign_name || ""));
+    const key = objectGroupKey(canonicalTitle);
+    const current: AggregatedObjectRow = grouped.get(key) || {
+      id: `object:${key}`,
+      campaign_name: canonicalTitle,
+      property_id: propertyId,
+      property_ids: [],
+      property: property,
+      status: String(campaign.status || "draft"),
+      objective: String(campaign.objective || ""),
+      updated_at: String(campaign.updated_at || ""),
+      _stats: [],
+    };
+
+    current.property_ids = unique([...current.property_ids, propertyId].filter(Boolean));
+    if (!current.property_id) current.property_id = propertyId;
+    if (!current.property && property) current.property = property;
+    if (String(campaign.updated_at || "") > String(current.updated_at || "")) {
+      current.updated_at = String(campaign.updated_at || "");
+      current.status = String(campaign.status || current.status || "draft");
+      current.objective = String(campaign.objective || current.objective || "");
+    }
+    current._stats?.push(
+      statsByCampaignId.get(String(campaign.id || "")) || emptyCampaignStats(),
+    );
+    grouped.set(key, current);
+  }
+
+  return Array.from(grouped.values())
+    .map((item) => ({
+      ...item,
+      stats: mergeCampaignStats(item._stats || []),
+    }))
+    .map(({ _stats, ...item }) => item)
+    .sort((left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
 }
 
 async function loadCampaignTargetStats(server: FastifyInstance, campaignIds: string[]) {
