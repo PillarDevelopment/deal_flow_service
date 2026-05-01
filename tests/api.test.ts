@@ -304,6 +304,9 @@ test("broker object playbook reads and saves real object content", async () => {
       subject: "Тестовая тема",
       letterBody: "Тестовое письмо",
       pingOne: "Пинг 1",
+      monthlyPlan: { firstTouchTarget: 40, followUpTarget: 12, uniqueCompaniesTarget: 25 },
+      weeklyPlan: { firstTouchTarget: 10, followUpTarget: 3, uniqueCompaniesTarget: 8 },
+      dailyPlan: { firstTouchTarget: 2, followUpTarget: 1, uniqueCompaniesTarget: 2 },
     },
   });
   assert.equal(saved.statusCode, 200);
@@ -312,6 +315,10 @@ test("broker object playbook reads and saves real object content", async () => {
   assert.equal(saved.json().letter_body, "Тестовое письмо");
   assert.equal(saved.json().ping_one, "Пинг 1");
   assert.equal(saved.json().status, "running");
+  assert.deepEqual(saved.json().monthly_plan, { firstTouchTarget: 40, followUpTarget: 12, uniqueCompaniesTarget: 25 });
+  assert.equal(saved.json().monthly_progress.target.firstTouchTarget, 40);
+  assert.equal(typeof saved.json().monthly_progress.pace_status, "string");
+  assert.equal(typeof saved.json().monthly_progress.completion_ratio, "number");
 
   const fetched = await app.inject({
     method: "GET",
@@ -320,6 +327,9 @@ test("broker object playbook reads and saves real object content", async () => {
   });
   assert.equal(fetched.statusCode, 200);
   assert.equal(fetched.json().subject, "Тестовая тема");
+  assert.deepEqual(fetched.json().weekly_plan, { firstTouchTarget: 10, followUpTarget: 3, uniqueCompaniesTarget: 8 });
+  assert.equal(typeof fetched.json().daily_progress.status, "string");
+  assert.equal(typeof fetched.json().daily_progress.elapsed_ratio, "number");
 
   await app.close();
 });

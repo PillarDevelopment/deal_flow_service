@@ -311,6 +311,21 @@ function renderBrokerPage() {
         background: rgba(167,80,59,0.12);
         color: var(--danger);
       }
+      .badge.status-ahead {
+        border-color: rgba(23,107,77,0.3);
+        background: rgba(23,107,77,0.12);
+        color: var(--accent);
+      }
+      .badge.status-behind {
+        border-color: rgba(167,80,59,0.3);
+        background: rgba(167,80,59,0.12);
+        color: var(--danger);
+      }
+      .badge.status-on-track {
+        border-color: rgba(219,168,74,0.45);
+        background: rgba(219,168,74,0.14);
+        color: #8d650f;
+      }
       .detail {
         display: grid;
         grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
@@ -339,6 +354,89 @@ function renderBrokerPage() {
       .recipient-toggle {
         padding: 8px 0;
         min-width: 40px;
+      }
+      .plan-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .plan-card {
+        border: 1px solid rgba(223,214,199,0.92);
+        border-radius: 18px;
+        background: rgba(255,255,255,0.72);
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+      }
+      .plan-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .plan-summary-card {
+        border: 1px solid rgba(223,214,199,0.92);
+        border-radius: 16px;
+        background: rgba(255,255,255,0.66);
+        padding: 12px;
+        display: grid;
+        gap: 8px;
+      }
+      .plan-summary-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .plan-summary-title {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .plan-summary-main {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .plan-summary-main strong {
+        font-size: 22px;
+      }
+      .plan-summary-sub {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .plan-card h3 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .plan-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .plan-inputs {
+        display: grid;
+        gap: 8px;
+      }
+      .plan-field {
+        display: grid;
+        gap: 4px;
+      }
+      .plan-field span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .plan-fact {
+        display: grid;
+        gap: 6px;
+        border-top: 1px solid rgba(223,214,199,0.72);
+        padding-top: 10px;
+      }
+      .plan-fact-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 13px;
       }
       .hidden { display: none !important; }
       .muted { color: var(--muted); }
@@ -375,6 +473,10 @@ function renderBrokerPage() {
         }
       }
       @media (max-width: 720px) {
+        .plan-summary-grid,
+        .plan-grid {
+          grid-template-columns: 1fr;
+        }
         .recipient-company-summary {
           grid-template-columns: minmax(0, 1fr) repeat(2, minmax(64px, auto));
         }
@@ -468,6 +570,106 @@ function renderBrokerPage() {
             <span class="badge" id="activeCompanyFollowUpBadge">follow-up: 0</span>
             <span class="badge" id="activeCompanyRecipientsBadge">получатели: 0</span>
             <span class="badge" id="activeCompanyStatusBadge">draft</span>
+          </div>
+          <div class="plan-summary-grid">
+            <div class="plan-summary-card">
+              <div class="plan-summary-top">
+                <span class="plan-summary-title">Месяц</span>
+                <span class="badge" id="monthlyPlanPaceBadge">Нет плана</span>
+              </div>
+              <div class="plan-summary-main">
+                <strong id="monthlyPlanCompletionValue">0%</strong>
+                <span class="plan-summary-sub" id="monthlyPlanCompletionMeta">0 / 0</span>
+              </div>
+            </div>
+            <div class="plan-summary-card">
+              <div class="plan-summary-top">
+                <span class="plan-summary-title">Неделя</span>
+                <span class="badge" id="weeklyPlanPaceBadge">Нет плана</span>
+              </div>
+              <div class="plan-summary-main">
+                <strong id="weeklyPlanCompletionValue">0%</strong>
+                <span class="plan-summary-sub" id="weeklyPlanCompletionMeta">0 / 0</span>
+              </div>
+            </div>
+            <div class="plan-summary-card">
+              <div class="plan-summary-top">
+                <span class="plan-summary-title">День</span>
+                <span class="badge" id="dailyPlanPaceBadge">Нет плана</span>
+              </div>
+              <div class="plan-summary-main">
+                <strong id="dailyPlanCompletionValue">0%</strong>
+                <span class="plan-summary-sub" id="dailyPlanCompletionMeta">0 / 0</span>
+              </div>
+            </div>
+          </div>
+          <div class="stack">
+            <h2>План отправок</h2>
+            <div class="plan-grid">
+              <div class="plan-card">
+                <div class="plan-head">
+                  <h3>Месяц</h3>
+                  <span class="badge" id="monthlyPlanStatusBadge">Не задан</span>
+                </div>
+                <div class="plan-inputs">
+                  <label class="plan-field">
+                    <span>Первые письма</span>
+                    <input id="monthlyFirstTouchTargetInput" type="number" min="0" step="1" />
+                  </label>
+                  <label class="plan-field">
+                    <span>Follow-up</span>
+                    <input id="monthlyFollowUpTargetInput" type="number" min="0" step="1" />
+                  </label>
+                  <label class="plan-field">
+                    <span>Уникальные фирмы</span>
+                    <input id="monthlyUniqueCompaniesTargetInput" type="number" min="0" step="1" />
+                  </label>
+                </div>
+                <div class="plan-fact" id="monthlyPlanFact"></div>
+              </div>
+              <div class="plan-card">
+                <div class="plan-head">
+                  <h3>Неделя</h3>
+                  <span class="badge" id="weeklyPlanStatusBadge">Не задан</span>
+                </div>
+                <div class="plan-inputs">
+                  <label class="plan-field">
+                    <span>Первые письма</span>
+                    <input id="weeklyFirstTouchTargetInput" type="number" min="0" step="1" />
+                  </label>
+                  <label class="plan-field">
+                    <span>Follow-up</span>
+                    <input id="weeklyFollowUpTargetInput" type="number" min="0" step="1" />
+                  </label>
+                  <label class="plan-field">
+                    <span>Уникальные фирмы</span>
+                    <input id="weeklyUniqueCompaniesTargetInput" type="number" min="0" step="1" />
+                  </label>
+                </div>
+                <div class="plan-fact" id="weeklyPlanFact"></div>
+              </div>
+              <div class="plan-card">
+                <div class="plan-head">
+                  <h3>День</h3>
+                  <span class="badge" id="dailyPlanStatusBadge">Не задан</span>
+                </div>
+                <div class="plan-inputs">
+                  <label class="plan-field">
+                    <span>Первые письма</span>
+                    <input id="dailyFirstTouchTargetInput" type="number" min="0" step="1" />
+                  </label>
+                  <label class="plan-field">
+                    <span>Follow-up</span>
+                    <input id="dailyFollowUpTargetInput" type="number" min="0" step="1" />
+                  </label>
+                  <label class="plan-field">
+                    <span>Уникальные фирмы</span>
+                    <input id="dailyUniqueCompaniesTargetInput" type="number" min="0" step="1" />
+                  </label>
+                </div>
+                <div class="plan-fact" id="dailyPlanFact"></div>
+              </div>
+            </div>
           </div>
           <div class="stack">
             <h2>Письмо</h2>
@@ -768,7 +970,78 @@ function renderBrokerPage() {
           pingOne: current?.ping_one || "Возвращаюсь к письму по объекту. Подскажите, актуально ли посмотреть материалы?",
           pingTwo: current?.ping_two || "Коротко напоминаю о предложении. Если интересно, отправлю расширенный пакет сегодня.",
           pingThree: current?.ping_three || "Последний follow-up по этому объекту. Если тема неактуальна, зафиксирую и сниму компанию с пинга.",
+          monthlyPlan: normalizePlan(current?.monthly_plan),
+          weeklyPlan: normalizePlan(current?.weekly_plan),
+          dailyPlan: normalizePlan(current?.daily_plan),
+          monthlyProgress: current?.monthly_progress || defaultPlanProgress(),
+          weeklyProgress: current?.weekly_progress || defaultPlanProgress(),
+          dailyProgress: current?.daily_progress || defaultPlanProgress(),
         };
+      }
+
+      function normalizePlan(plan) {
+        return {
+          firstTouchTarget: Math.max(0, Number(plan?.firstTouchTarget || 0) || 0),
+          followUpTarget: Math.max(0, Number(plan?.followUpTarget || 0) || 0),
+          uniqueCompaniesTarget: Math.max(0, Number(plan?.uniqueCompaniesTarget || 0) || 0),
+        };
+      }
+
+      function defaultPlanProgress() {
+        return {
+          target: normalizePlan(),
+          actual: {
+            firstTouchCount: 0,
+            followUpCount: 0,
+            uniqueCompaniesCount: 0,
+          },
+          status: "not_planned",
+          pace_status: "not_planned",
+          completion_ratio: 0,
+          elapsed_ratio: 0,
+          overdue: false,
+        };
+      }
+
+      function planStatusMeta(status) {
+        if (status === "done") return { label: "Выполнен", className: "badge status-active" };
+        if (status === "in_progress") return { label: "В работе", className: "badge status-inactive" };
+        if (status === "not_started") return { label: "Не начат", className: "badge status-stopped" };
+        return { label: "Не задан", className: "badge" };
+      }
+
+      function planPaceMeta(status) {
+        if (status === "ahead") return { label: "Перевыполнен", className: "badge status-ahead" };
+        if (status === "behind") return { label: "Отстает", className: "badge status-behind" };
+        if (status === "on_track") return { label: "Идет по плану", className: "badge status-on-track" };
+        return { label: "Нет плана", className: "badge" };
+      }
+
+      function setPlanFact(prefix, progress) {
+        const meta = planStatusMeta(progress?.status);
+        $(prefix + "PlanStatusBadge").textContent = meta.label;
+        $(prefix + "PlanStatusBadge").className = meta.className;
+        $(prefix + "PlanFact").innerHTML = [
+          ["Первые письма", progress?.actual?.firstTouchCount || 0, progress?.target?.firstTouchTarget || 0],
+          ["Follow-up", progress?.actual?.followUpCount || 0, progress?.target?.followUpTarget || 0],
+          ["Уникальные фирмы", progress?.actual?.uniqueCompaniesCount || 0, progress?.target?.uniqueCompaniesTarget || 0],
+        ].map(([label, actual, target]) =>
+          '<div class="plan-fact-row"><span>' + label + '</span><strong>' + actual + ' / ' + target + '</strong></div>'
+        ).join("");
+      }
+
+      function setPlanSummary(prefix, progress) {
+        const pace = planPaceMeta(progress?.pace_status);
+        const totalTarget = (progress?.target?.firstTouchTarget || 0)
+          + (progress?.target?.followUpTarget || 0)
+          + (progress?.target?.uniqueCompaniesTarget || 0);
+        const totalActual = Math.min(progress?.actual?.firstTouchCount || 0, progress?.target?.firstTouchTarget || 0)
+          + Math.min(progress?.actual?.followUpCount || 0, progress?.target?.followUpTarget || 0)
+          + Math.min(progress?.actual?.uniqueCompaniesCount || 0, progress?.target?.uniqueCompaniesTarget || 0);
+        $(prefix + "PlanPaceBadge").textContent = pace.label;
+        $(prefix + "PlanPaceBadge").className = pace.className;
+        $(prefix + "PlanCompletionValue").textContent = Math.round((progress?.completion_ratio || 0) * 100) + "%";
+        $(prefix + "PlanCompletionMeta").textContent = totalActual + " / " + totalTarget;
       }
 
       async function loadSelectedCampaignPlaybook() {
@@ -799,6 +1072,21 @@ function renderBrokerPage() {
           $("companyPingOneInput").value = "";
           $("companyPingTwoInput").value = "";
           $("companyPingThreeInput").value = "";
+          $("monthlyFirstTouchTargetInput").value = "0";
+          $("monthlyFollowUpTargetInput").value = "0";
+          $("monthlyUniqueCompaniesTargetInput").value = "0";
+          $("weeklyFirstTouchTargetInput").value = "0";
+          $("weeklyFollowUpTargetInput").value = "0";
+          $("weeklyUniqueCompaniesTargetInput").value = "0";
+          $("dailyFirstTouchTargetInput").value = "0";
+          $("dailyFollowUpTargetInput").value = "0";
+          $("dailyUniqueCompaniesTargetInput").value = "0";
+          setPlanSummary("monthly", defaultPlanProgress());
+          setPlanSummary("weekly", defaultPlanProgress());
+          setPlanSummary("daily", defaultPlanProgress());
+          setPlanFact("monthly", defaultPlanProgress());
+          setPlanFact("weekly", defaultPlanProgress());
+          setPlanFact("daily", defaultPlanProgress());
           $("activeCompanyRecipientsList").innerHTML = '<div class="small">Получатели появятся после выбора компании.</div>';
           $("activeCompanyPageBadge").textContent = "1 / 1";
           $("activeCompanyPrevPageBtn").disabled = true;
@@ -827,6 +1115,21 @@ function renderBrokerPage() {
         $("companyPingOneInput").value = draft.pingOne || "";
         $("companyPingTwoInput").value = draft.pingTwo || "";
         $("companyPingThreeInput").value = draft.pingThree || "";
+        $("monthlyFirstTouchTargetInput").value = String(draft.monthlyPlan.firstTouchTarget || 0);
+        $("monthlyFollowUpTargetInput").value = String(draft.monthlyPlan.followUpTarget || 0);
+        $("monthlyUniqueCompaniesTargetInput").value = String(draft.monthlyPlan.uniqueCompaniesTarget || 0);
+        $("weeklyFirstTouchTargetInput").value = String(draft.weeklyPlan.firstTouchTarget || 0);
+        $("weeklyFollowUpTargetInput").value = String(draft.weeklyPlan.followUpTarget || 0);
+        $("weeklyUniqueCompaniesTargetInput").value = String(draft.weeklyPlan.uniqueCompaniesTarget || 0);
+        $("dailyFirstTouchTargetInput").value = String(draft.dailyPlan.firstTouchTarget || 0);
+        $("dailyFollowUpTargetInput").value = String(draft.dailyPlan.followUpTarget || 0);
+        $("dailyUniqueCompaniesTargetInput").value = String(draft.dailyPlan.uniqueCompaniesTarget || 0);
+        setPlanSummary("monthly", draft.monthlyProgress);
+        setPlanSummary("weekly", draft.weeklyProgress);
+        setPlanSummary("daily", draft.dailyProgress);
+        setPlanFact("monthly", draft.monthlyProgress);
+        setPlanFact("weekly", draft.weeklyProgress);
+        setPlanFact("daily", draft.dailyProgress);
         renderCompanyStatusControls(draft.status || "draft");
         $("activeCompanyRecipientsList").innerHTML = targetCompanies.length
           ? pageItems.map((company) => {
@@ -876,6 +1179,21 @@ function renderBrokerPage() {
           pingOne: $("companyPingOneInput").value.trim(),
           pingTwo: $("companyPingTwoInput").value.trim(),
           pingThree: $("companyPingThreeInput").value.trim(),
+          monthlyPlan: {
+            firstTouchTarget: Number($("monthlyFirstTouchTargetInput").value || 0),
+            followUpTarget: Number($("monthlyFollowUpTargetInput").value || 0),
+            uniqueCompaniesTarget: Number($("monthlyUniqueCompaniesTargetInput").value || 0),
+          },
+          weeklyPlan: {
+            firstTouchTarget: Number($("weeklyFirstTouchTargetInput").value || 0),
+            followUpTarget: Number($("weeklyFollowUpTargetInput").value || 0),
+            uniqueCompaniesTarget: Number($("weeklyUniqueCompaniesTargetInput").value || 0),
+          },
+          dailyPlan: {
+            firstTouchTarget: Number($("dailyFirstTouchTargetInput").value || 0),
+            followUpTarget: Number($("dailyFollowUpTargetInput").value || 0),
+            uniqueCompaniesTarget: Number($("dailyUniqueCompaniesTargetInput").value || 0),
+          },
         };
         state.selectedCampaignPlaybook = await apiFetch("/broker/campaigns/" + encodeURIComponent(campaign.id) + "/playbook", {
           method: "PUT",

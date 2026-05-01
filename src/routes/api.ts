@@ -96,6 +96,9 @@ type CompanyPlaybookBody = {
   pingOne?: string;
   pingTwo?: string;
   pingThree?: string;
+  monthlyPlan?: Record<string, unknown>;
+  weeklyPlan?: Record<string, unknown>;
+  dailyPlan?: Record<string, unknown>;
 };
 
 type CampaignTargetRow = {
@@ -177,9 +180,37 @@ type CompanyPlaybookRow = {
   ping_one: string | null;
   ping_two: string | null;
   ping_three: string | null;
+  monthly_plan: Record<string, unknown> | null;
+  weekly_plan: Record<string, unknown> | null;
+  daily_plan: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
+
+type ObjectPlan = {
+  firstTouchTarget: number;
+  followUpTarget: number;
+  uniqueCompaniesTarget: number;
+};
+
+type ObjectPlanProgress = {
+  target: ObjectPlan;
+  actual: {
+    firstTouchCount: number;
+    followUpCount: number;
+    uniqueCompaniesCount: number;
+  };
+  status: "not_planned" | "not_started" | "in_progress" | "done";
+  pace_status: "not_planned" | "behind" | "on_track" | "ahead";
+  completion_ratio: number;
+  elapsed_ratio: number;
+  overdue: boolean;
+};
+
+const PLAYBOOK_BASE_SELECT = "id,company_key,company_name,status,subject,letter_body,ping_one,ping_two,ping_three,created_at,updated_at";
+const PLAYBOOK_PLAN_SELECT = `${PLAYBOOK_BASE_SELECT},monthly_plan,weekly_plan,daily_plan`;
+const PLAYBOOK_PLAN_MARKER_PREFIX = "\n<!--broker_plan:";
+const PLAYBOOK_PLAN_MARKER_SUFFIX = "-->";
 
 type AggregatedObjectRow = {
   id: string;
@@ -1009,13 +1040,22 @@ export async function brokerApiRoutes(server: FastifyInstance) {
   server.get<{ Params: { id: string } }>("/campaigns/:id/playbook", async (request, reply) => {
     const resolved = await resolvePlaybookTarget(server, request.params.id);
     if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
-    const { data, error } = await server.db
-      .from("broker_company_playbooks")
-      .select("id,company_key,company_name,status,subject,letter_body,ping_one,ping_two,ping_three,created_at,updated_at")
-      .eq("company_key", resolved.companyKey)
-      .maybeSingle<CompanyPlaybookRow>();
+    const objectDetail = await loadObjectDetail(server, resolved.companyKey.slice("object:".length));
+    const targets = Array.isArray(objectDetail?.targets) ? objectDetail.targets : [];
+    const { data, error } = await selectPlaybookByCompanyKey(server, resolved.companyKey);
     if (error) return reply.status(500).send({ error: error.message });
-    return data ?? {
+    const monthlyPlan = normalizeObjectPlan(data?.monthly_plan);
+    const weeklyPlan = normalizeObjectPlan(data?.weekly_plan);
+    const dailyPlan = normalizeObjectPlan(data?.daily_plan);
+    return data ? {
+      ...data,
+      monthly_plan: monthlyPlan,
+      weekly_plan: weeklyPlan,
+      daily_plan: dailyPlan,
+      monthly_progress: buildObjectPlanProgress(monthlyPlan, targets, "month"),
+      weekly_progress: buildObjectPlanProgress(weeklyPlan, targets, "week"),
+      daily_progress: buildObjectPlanProgress(dailyPlan, targets, "day"),
+    } : {
       company_key: resolved.companyKey,
       company_name: resolved.companyName,
       status: "draft",
@@ -1024,6 +1064,12 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       ping_one: null,
       ping_two: null,
       ping_three: null,
+      monthly_plan: monthlyPlan,
+      weekly_plan: weeklyPlan,
+      daily_plan: dailyPlan,
+      monthly_progress: buildObjectPlanProgress(monthlyPlan, targets, "month"),
+      weekly_progress: buildObjectPlanProgress(weeklyPlan, targets, "week"),
+      daily_progress: buildObjectPlanProgress(dailyPlan, targets, "day"),
     };
   });
 
@@ -1039,15 +1085,28 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       ping_one: normalizeNullableString(request.body?.pingOne, 20000),
       ping_two: normalizeNullableString(request.body?.pingTwo, 20000),
       ping_three: normalizeNullableString(request.body?.pingThree, 20000),
+      monthly_plan: normalizeObjectPlan(request.body?.monthlyPlan),
+      weekly_plan: normalizeObjectPlan(request.body?.weeklyPlan),
+      daily_plan: normalizeObjectPlan(request.body?.dailyPlan),
       updated_at: new Date().toISOString(),
     };
-    const { data, error } = await server.db
-      .from("broker_company_playbooks")
-      .upsert(payload, { onConflict: "company_key" })
-      .select("id,company_key,company_name,status,subject,letter_body,ping_one,ping_two,ping_three,created_at,updated_at")
-      .maybeSingle<CompanyPlaybookRow>();
+    const { data, error } = await upsertPlaybook(server, payload);
     if (error) return reply.status(500).send({ error: error.message });
-    return data ?? payload;
+    const objectDetail = await loadObjectDetail(server, resolved.companyKey.slice("object:".length));
+    const targets = Array.isArray(objectDetail?.targets) ? objectDetail.targets : [];
+    const saved = data ?? payload;
+    const monthlyPlan = normalizeObjectPlan(saved.monthly_plan);
+    const weeklyPlan = normalizeObjectPlan(saved.weekly_plan);
+    const dailyPlan = normalizeObjectPlan(saved.daily_plan);
+    return {
+      ...saved,
+      monthly_plan: monthlyPlan,
+      weekly_plan: weeklyPlan,
+      daily_plan: dailyPlan,
+      monthly_progress: buildObjectPlanProgress(monthlyPlan, targets, "month"),
+      weekly_progress: buildObjectPlanProgress(weeklyPlan, targets, "week"),
+      daily_progress: buildObjectPlanProgress(dailyPlan, targets, "day"),
+    };
   });
 
   server.patch<{ Params: { id: string }; Body: CampaignBody }>("/campaigns/:id", async (request, reply) => {
@@ -1509,6 +1568,303 @@ function emptyCampaignStats() {
     recipientCount: 0,
     companyCount: 0,
   };
+}
+
+async function selectPlaybookByCompanyKey(server: FastifyInstance, companyKey: string) {
+  const preferred = await server.db
+    .from("broker_company_playbooks")
+    .select(PLAYBOOK_PLAN_SELECT)
+    .eq("company_key", companyKey)
+    .maybeSingle<CompanyPlaybookRow>();
+  if (!isMissingPlaybookPlanColumnError(preferred.error)) {
+    return preferred;
+  }
+  const fallback = await server.db
+    .from("broker_company_playbooks")
+    .select(PLAYBOOK_BASE_SELECT)
+    .eq("company_key", companyKey)
+    .maybeSingle<Record<string, unknown>>();
+  return {
+    data: fallback.data ? withEmbeddedPlans(fallback.data) : null,
+    error: fallback.error,
+  };
+}
+
+async function upsertPlaybook(server: FastifyInstance, payload: Record<string, unknown>) {
+  const preferred = await server.db
+    .from("broker_company_playbooks")
+    .upsert(payload, { onConflict: "company_key" })
+    .select(PLAYBOOK_PLAN_SELECT)
+    .maybeSingle<CompanyPlaybookRow>();
+  if (!isMissingPlaybookPlanColumnError(preferred.error)) {
+    return preferred;
+  }
+  const legacyPayload = { ...payload };
+  const monthlyPlan = normalizeObjectPlan(legacyPayload.monthly_plan);
+  const weeklyPlan = normalizeObjectPlan(legacyPayload.weekly_plan);
+  const dailyPlan = normalizeObjectPlan(legacyPayload.daily_plan);
+  const letterBody = normalizeNullableString(legacyPayload.letter_body, 20000);
+  legacyPayload.letter_body = embedPlansInLetterBody(letterBody, {
+    monthlyPlan,
+    weeklyPlan,
+    dailyPlan,
+  });
+  delete legacyPayload.monthly_plan;
+  delete legacyPayload.weekly_plan;
+  delete legacyPayload.daily_plan;
+  const fallback = await server.db
+    .from("broker_company_playbooks")
+    .upsert(legacyPayload, { onConflict: "company_key" })
+    .select(PLAYBOOK_BASE_SELECT)
+    .maybeSingle<Record<string, unknown>>();
+  return {
+    data: fallback.data ? withEmbeddedPlans(fallback.data) : withEmbeddedPlans(legacyPayload),
+    error: fallback.error,
+  };
+}
+
+function withEmbeddedPlans(value: Record<string, unknown>) {
+  const parsed = extractPlansFromLetterBody(normalizeNullableString(value.letter_body, 20000));
+  return {
+    ...value,
+    letter_body: parsed.letterBody,
+    monthly_plan: parsed.monthlyPlan,
+    weekly_plan: parsed.weeklyPlan,
+    daily_plan: parsed.dailyPlan,
+  };
+}
+
+function isMissingPlaybookPlanColumnError(error: { message?: string; code?: string } | null) {
+  const message = String(error?.message || "");
+  return message.includes("monthly_plan") || message.includes("weekly_plan") || message.includes("daily_plan");
+}
+
+function extractPlansFromLetterBody(letterBody: string | null) {
+  const value = String(letterBody || "");
+  const markerIndex = value.lastIndexOf(PLAYBOOK_PLAN_MARKER_PREFIX);
+  if (markerIndex < 0) {
+    return {
+      letterBody: value,
+      monthlyPlan: emptyObjectPlan(),
+      weeklyPlan: emptyObjectPlan(),
+      dailyPlan: emptyObjectPlan(),
+    };
+  }
+  const markerEnd = value.indexOf(PLAYBOOK_PLAN_MARKER_SUFFIX, markerIndex + PLAYBOOK_PLAN_MARKER_PREFIX.length);
+  if (markerEnd < 0) {
+    return {
+      letterBody: value,
+      monthlyPlan: emptyObjectPlan(),
+      weeklyPlan: emptyObjectPlan(),
+      dailyPlan: emptyObjectPlan(),
+    };
+  }
+  const cleanBody = value.slice(0, markerIndex).trimEnd();
+  const rawJson = value.slice(markerIndex + PLAYBOOK_PLAN_MARKER_PREFIX.length, markerEnd).trim();
+  try {
+    const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+    return {
+      letterBody: cleanBody,
+      monthlyPlan: normalizeObjectPlan(parsed.monthlyPlan),
+      weeklyPlan: normalizeObjectPlan(parsed.weeklyPlan),
+      dailyPlan: normalizeObjectPlan(parsed.dailyPlan),
+    };
+  } catch {
+    return {
+      letterBody: cleanBody,
+      monthlyPlan: emptyObjectPlan(),
+      weeklyPlan: emptyObjectPlan(),
+      dailyPlan: emptyObjectPlan(),
+    };
+  }
+}
+
+function embedPlansInLetterBody(letterBody: string | null, plans: {
+  monthlyPlan: ObjectPlan;
+  weeklyPlan: ObjectPlan;
+  dailyPlan: ObjectPlan;
+}) {
+  const cleanBody = extractPlansFromLetterBody(letterBody).letterBody.trimEnd();
+  const serialized = JSON.stringify(plans);
+  return `${cleanBody}${PLAYBOOK_PLAN_MARKER_PREFIX}${serialized}${PLAYBOOK_PLAN_MARKER_SUFFIX}`;
+}
+
+const MOSCOW_TIMEZONE = "Europe/Moscow";
+
+function emptyObjectPlan(): ObjectPlan {
+  return {
+    firstTouchTarget: 0,
+    followUpTarget: 0,
+    uniqueCompaniesTarget: 0,
+  };
+}
+
+function normalizePlanNumber(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.floor(parsed);
+}
+
+function normalizeObjectPlan(value: unknown): ObjectPlan {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    firstTouchTarget: normalizePlanNumber(source.firstTouchTarget),
+    followUpTarget: normalizePlanNumber(source.followUpTarget),
+    uniqueCompaniesTarget: normalizePlanNumber(source.uniqueCompaniesTarget),
+  };
+}
+
+function moscowDateParts(value: string | number | Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: MOSCOW_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(value));
+  const get = (type: "year" | "month" | "day") => Number(parts.find((part) => part.type === type)?.value || 0);
+  return { year: get("year"), month: get("month"), day: get("day") };
+}
+
+function moscowDayKey(value: string | number | Date) {
+  const parts = moscowDateParts(value);
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function moscowMonthKey(value: string | number | Date) {
+  const parts = moscowDateParts(value);
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}`;
+}
+
+function moscowWeekKey(value: string | number | Date) {
+  const parts = moscowDateParts(value);
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
+}
+
+function buildObjectPlanProgress(plan: ObjectPlan, targets: CampaignTargetRow[], scope: "month" | "week" | "day"): ObjectPlanProgress {
+  const now = new Date();
+  const currentCreatedKey = scope === "month"
+    ? moscowMonthKey(now)
+    : scope === "week"
+      ? moscowWeekKey(now)
+      : moscowDayKey(now);
+  let firstTouchCount = 0;
+  let followUpCount = 0;
+  const uniqueCompanies = new Set<string>();
+
+  for (const target of targets) {
+    const createdAt = target.created_at || target.updated_at;
+    const updatedAt = target.updated_at || target.created_at;
+    if (createdAt) {
+      const createdKey = scope === "month"
+        ? moscowMonthKey(createdAt)
+        : scope === "week"
+          ? moscowWeekKey(createdAt)
+          : moscowDayKey(createdAt);
+      if (createdKey === currentCreatedKey && isFirstTouchStatus(target.status)) {
+        firstTouchCount += 1;
+        uniqueCompanies.add(normalizeString(target.company_name, 240).toLowerCase() || target.email.toLowerCase());
+      }
+    }
+    if (updatedAt) {
+      const updatedKey = scope === "month"
+        ? moscowMonthKey(updatedAt)
+        : scope === "week"
+          ? moscowWeekKey(updatedAt)
+          : moscowDayKey(updatedAt);
+      if (updatedKey === currentCreatedKey && target.status === "followed_up") {
+        followUpCount += 1;
+      }
+    }
+  }
+
+  const totalPlanned = plan.firstTouchTarget + plan.followUpTarget + plan.uniqueCompaniesTarget;
+  const completedValue = Math.min(firstTouchCount, plan.firstTouchTarget)
+    + Math.min(followUpCount, plan.followUpTarget)
+    + Math.min(uniqueCompanies.size, plan.uniqueCompaniesTarget);
+  const completionRatio = totalPlanned > 0 ? completedValue / totalPlanned : 0;
+  const completed = (
+    firstTouchCount >= plan.firstTouchTarget &&
+    followUpCount >= plan.followUpTarget &&
+    uniqueCompanies.size >= plan.uniqueCompaniesTarget
+  );
+  const hasActual = firstTouchCount > 0 || followUpCount > 0 || uniqueCompanies.size > 0;
+  const elapsedRatio = scope === "month"
+    ? monthElapsedRatio(now)
+    : scope === "week"
+      ? weekElapsedRatio(now)
+      : dayElapsedRatio(now);
+  const overTarget = (
+    firstTouchCount > plan.firstTouchTarget ||
+    followUpCount > plan.followUpTarget ||
+    uniqueCompanies.size > plan.uniqueCompaniesTarget
+  );
+  const paceStatus = totalPlanned === 0
+    ? "not_planned"
+    : completed && overTarget
+      ? "ahead"
+      : completed
+        ? "on_track"
+        : completionRatio + 0.05 < elapsedRatio
+          ? "behind"
+          : "on_track";
+
+  return {
+    target: plan,
+    actual: {
+      firstTouchCount,
+      followUpCount,
+      uniqueCompaniesCount: uniqueCompanies.size,
+    },
+    status: totalPlanned === 0
+      ? "not_planned"
+      : completed
+        ? "done"
+        : hasActual
+          ? "in_progress"
+          : "not_started",
+    pace_status: paceStatus,
+    completion_ratio: Number(completionRatio.toFixed(4)),
+    elapsed_ratio: Number(elapsedRatio.toFixed(4)),
+    overdue: paceStatus === "behind",
+  };
+}
+
+function monthElapsedRatio(value: string | number | Date) {
+  const parts = moscowDateParts(value);
+  const daysInMonth = new Date(Date.UTC(parts.year, parts.month, 0)).getUTCDate();
+  if (!daysInMonth) return 0;
+  return clampRatio(parts.day / daysInMonth);
+}
+
+function weekElapsedRatio(value: string | number | Date) {
+  const parts = moscowDateParts(value);
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+  const day = date.getUTCDay() || 7;
+  return clampRatio(day / 7);
+}
+
+function dayElapsedRatio(value: string | number | Date) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: MOSCOW_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(value));
+  const hour = Number(parts.find((part) => part.type === "hour")?.value || 0);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
+  return clampRatio(((hour * 60) + minute) / 1440);
+}
+
+function clampRatio(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
 }
 
 function summarizeCampaignTargets(targets: CampaignTargetRow[]) {

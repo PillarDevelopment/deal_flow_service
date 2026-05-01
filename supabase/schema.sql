@@ -207,6 +207,9 @@ create table if not exists public.broker_company_playbooks (
   ping_one text,
   ping_two text,
   ping_three text,
+  monthly_plan jsonb not null default '{"firstTouchTarget":0,"followUpTarget":0,"uniqueCompaniesTarget":0}'::jsonb,
+  weekly_plan jsonb not null default '{"firstTouchTarget":0,"followUpTarget":0,"uniqueCompaniesTarget":0}'::jsonb,
+  daily_plan jsonb not null default '{"firstTouchTarget":0,"followUpTarget":0,"uniqueCompaniesTarget":0}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint broker_company_playbooks_status_check check (
