@@ -9,6 +9,7 @@
 - сделки и воронку;
 - связь сделки с объектами из каталога `properties`;
 - timeline активностей;
+- общий справочник компаний для отбора target lists;
 - страницу `/broker`.
 
 `properties` остаются в общей Supabase-базе и используются как единый каталог объектов. Этот сервис не владеет каталогом и не изменяет объекты.
@@ -89,6 +90,7 @@ supabase/schema.sql
 - `broker_campaign_briefs` хранит snapshot брифа и объекта на момент создания кампании.
 - `broker_campaign_hypotheses` хранит ICP-гипотезы и их согласование.
 - `broker_campaign_targets`, `broker_message_*`, `broker_send_*`, `broker_mailboxes`, `broker_quota_windows`, `broker_amo_exports` и `broker_approvals` задают будущий контур отправок, квот, аналитики и AMO outbox.
+- `broker_company_directory` хранит единую импортированную базу компаний и не смешивается с `broker_clients`.
 - `properties` остается таблицей каталога во владении `deal_worker`; этот сервис ее не изменяет.
 
 ## Routes
@@ -119,6 +121,7 @@ supabase/schema.sql
 - `GET /broker/campaigns/:id/hypotheses`
 - `POST /broker/campaigns/:id/hypotheses`
 - `PATCH /broker/campaign-hypotheses/:id`
+- `GET /broker/company-directory`
 
 ## Проверка MVP
 
@@ -178,6 +181,26 @@ node --import tsx scripts/import_sales_campaign_crm.ts --apply
 Карта полей и стадий:
 
 - `docs/sales_campaign_import.md`
+
+## Import unified company base
+
+Источник по умолчанию:
+
+- `../deal_worker/bases/companies_may.csv`
+
+Dry run:
+
+```bash
+node --import tsx scripts/import_company_directory.ts
+```
+
+Apply:
+
+```bash
+node --import tsx scripts/import_company_directory.ts --apply
+```
+
+Важно: импорт идет в `broker_company_directory`, а не в `broker_clients`.
 
 ## Production notes
 

@@ -11,7 +11,9 @@
     "import:campaign-crm": "node --import tsx scripts/import_sales_campaign_crm.ts --apply",
     "import:campaign-crm:dry": "node --import tsx scripts/import_sales_campaign_crm.ts",
     "import:historical-campaigns": "node --import tsx scripts/import_historical_sales_campaigns.ts --apply",
-    "import:historical-campaigns:dry": "node --import tsx scripts/import_historical_sales_campaigns.ts"
+    "import:historical-campaigns:dry": "node --import tsx scripts/import_historical_sales_campaigns.ts",
+    "import:company-directory": "node --import tsx scripts/import_company_directory.ts --apply",
+    "import:company-directory:dry": "node --import tsx scripts/import_company_directory.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.3",

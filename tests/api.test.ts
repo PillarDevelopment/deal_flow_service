@@ -16,6 +16,7 @@ type TableName =
   | "broker_campaign_briefs"
   | "broker_campaign_hypotheses"
   | "broker_campaign_targets"
+  | "broker_company_directory"
   | "broker_message_threads"
   | "broker_message_versions"
   | "broker_sequence_steps"
@@ -163,6 +164,24 @@ test("broker catalog bridge returns published properties only", async () => {
   await app.close();
 });
 
+test("broker company directory returns imported base rows", async () => {
+  const app = await buildTestApp();
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/broker/company-directory?q=Логистика",
+    headers: authHeaders(),
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.total, 1);
+  assert.equal(body.items[0].company_name, "Склад Логистика");
+  assert.equal(body.items[0].email, "hello@warehouse.example");
+
+  await app.close();
+});
+
 test("broker campaign API creates an object campaign and manages hypotheses", async () => {
   const app = await buildTestApp();
   const headers = authHeaders();
@@ -262,6 +281,19 @@ function createStore(): Store {
     broker_campaign_briefs: [],
     broker_campaign_hypotheses: [],
     broker_campaign_targets: [],
+    broker_company_directory: [
+      {
+        id: "00000000-0000-4000-8000-000000000201",
+        company_name: "Склад Логистика",
+        email: "hello@warehouse.example",
+        city: "Москва",
+        region: "Москва",
+        rubric: "Склады",
+        subrubric: "3PL",
+        created_at: "2026-05-01T09:00:00.000Z",
+        updated_at: "2026-05-01T09:00:00.000Z",
+      },
+    ],
     broker_message_threads: [],
     broker_message_versions: [],
     broker_sequence_steps: [],
@@ -370,6 +402,15 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: Error | null }> {
     return this;
   }
 
+  in(field: string, values: unknown[]) {
+    this.filters.push((row) => values.includes(row[field]));
+    return this;
+  }
+
+  returns<T>() {
+    return this as unknown as PromiseLike<{ data: T; error: Error | null; count?: number | null }>;
+  }
+
   insert(payload: Row | Row[]) {
     this.operation = "insert";
     this.payload = payload;
@@ -418,7 +459,8 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: Error | null }> {
     if (this.operation === "update") return this.executeUpdate();
     if (this.operation === "upsert") return this.executeUpsert();
     if (this.operation === "delete") return this.executeDelete();
-    return { data: this.applySelect(), error: null };
+    const data = this.applySelect();
+    return { data, error: null, count: Array.isArray(data) ? data.length : 0 };
   }
 
   private executeInsert() {

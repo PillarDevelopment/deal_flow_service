@@ -19,6 +19,8 @@ type ListQuery = {
   stage?: string;
   clientId?: string;
   propertyId?: string;
+  region?: string;
+  rubric?: string;
 };
 
 type ClientBody = {
@@ -86,6 +88,60 @@ type CampaignHypothesisBody = {
   reasoning?: string;
 };
 
+type CampaignTargetRow = {
+  id: string;
+  campaign_id: string;
+  company_name: string;
+  contact_name: string | null;
+  email: string;
+  source: string | null;
+  object_role: string | null;
+  domain: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type CampaignIndexRow = {
+  id: string;
+  campaign_name: string;
+  property_id: string;
+};
+
+type PropertyIndexRow = {
+  id: string;
+  title: string | null;
+  address: string | null;
+  region: string | null;
+};
+
+type CompanyDirectoryRow = {
+  id: string;
+  company_name: string;
+  email: string;
+  site_title: string | null;
+  company_type: string | null;
+  city: string | null;
+  city_district: string | null;
+  region: string | null;
+  federal_district: string | null;
+  rubric: string | null;
+  subrubric: string | null;
+  subrubric_type: string | null;
+  coordinates: string | null;
+  working_hours: string | null;
+  timezone: string | null;
+  business_status: string | null;
+  internet_rating: string | null;
+  review_count_estimate: string | null;
+  domain: string | null;
+  source: string;
+  source_file: string | null;
+  import_batch: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export async function brokerApiRoutes(server: FastifyInstance) {
   server.addHook("preHandler", requireSuperAdmin);
 
@@ -98,7 +154,7 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     const q = normalizeString(request.query.q, 120);
     let query = server.db
       .from("broker_clients")
-      .select("*")
+      .select("*", { count: "exact" })
       .order("updated_at", { ascending: false })
       .limit(limit);
 
@@ -113,9 +169,9 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       ].join(","));
     }
 
-    const { data, error } = await query;
+    const { data, error, count } = await query;
     if (error) return reply.status(500).send({ error: error.message });
-    return { items: data ?? [] };
+    return { items: data ?? [], total: count ?? data?.length ?? 0 };
   });
 
   server.post<{ Body: ClientBody }>("/clients", async (request, reply) => {
@@ -176,7 +232,7 @@ export async function brokerApiRoutes(server: FastifyInstance) {
           *,
           property:properties (id,title,address,region,price_rub,area_sqm,price_per_sqm,attributes,curation_status)
         )
-      `)
+      `, { count: "exact" })
       .order("updated_at", { ascending: false })
       .limit(limit);
 
@@ -190,9 +246,164 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       query = query.ilike("title", `%${escapeLike(q)}%`);
     }
 
-    const { data, error } = await query;
+    const { data, error, count } = await query;
     if (error) return reply.status(500).send({ error: error.message });
-    return { items: data ?? [] };
+    return { items: data ?? [], total: count ?? data?.length ?? 0 };
+  });
+
+  server.get<{ Querystring: ListQuery }>("/outreach/companies", async (request, reply) => {
+    const limit = normalizeLimit(request.query.limit, 250);
+    const q = normalizeString(request.query.q, 120);
+    let targetsQuery = server.db
+      .from("broker_campaign_targets")
+      .select("id,campaign_id,company_name,contact_name,email,source,object_role,domain,status,created_at,updated_at")
+      .order("company_name", { ascending: true })
+      .limit(5000);
+
+    if (q) {
+      const like = `%${escapeLike(q)}%`;
+      targetsQuery = targetsQuery.or([
+        `company_name.ilike.${like}`,
+        `email.ilike.${like}`,
+        `domain.ilike.${like}`,
+      ].join(","));
+    }
+
+    const { data: targets, error: targetsError } = await targetsQuery.returns<CampaignTargetRow[]>();
+    if (targetsError) return reply.status(500).send({ error: targetsError.message });
+
+    const campaignIds = unique((targets || []).map((target) => target.campaign_id).filter(Boolean));
+    const campaignsById = new Map<string, CampaignIndexRow>();
+    const propertiesById = new Map<string, PropertyIndexRow>();
+    if (campaignIds.length) {
+      const { data: campaigns, error: campaignsError } = await server.db
+        .from("broker_campaigns")
+        .select("id,campaign_name,property_id")
+        .in("id", campaignIds)
+        .returns<CampaignIndexRow[]>();
+      if (campaignsError) return reply.status(500).send({ error: campaignsError.message });
+      for (const campaign of campaigns || []) campaignsById.set(campaign.id, campaign);
+
+      const propertyIds = unique((campaigns || []).map((campaign) => campaign.property_id).filter(Boolean));
+      if (propertyIds.length) {
+        const { data: properties, error: propertiesError } = await server.db
+          .from("properties")
+          .select("id,title,address,region")
+          .in("id", propertyIds)
+          .returns<PropertyIndexRow[]>();
+        if (propertiesError) return reply.status(500).send({ error: propertiesError.message });
+        for (const property of properties || []) propertiesById.set(property.id, property);
+      }
+    }
+
+    const byCompany = new Map<string, {
+      companyName: string;
+      firstTouchCount: number;
+      followUpCount: number;
+      repliedCount: number;
+      bouncedCount: number;
+      suppressedCount: number;
+      uniqueEmails: Set<string>;
+      objects: Set<string>;
+      recipients: Array<Record<string, unknown>>;
+    }>();
+
+    for (const target of targets || []) {
+      const key = target.company_name.trim().toLowerCase() || target.email.toLowerCase();
+      const item = byCompany.get(key) || {
+        companyName: target.company_name || target.email,
+        firstTouchCount: 0,
+        followUpCount: 0,
+        repliedCount: 0,
+        bouncedCount: 0,
+        suppressedCount: 0,
+        uniqueEmails: new Set<string>(),
+        objects: new Set<string>(),
+        recipients: [],
+      };
+      const campaign = campaignsById.get(target.campaign_id);
+      const property = campaign?.property_id ? propertiesById.get(campaign.property_id) : null;
+      const objectName = property?.title || campaign?.campaign_name || "";
+
+      if (isFirstTouchStatus(target.status)) item.firstTouchCount += 1;
+      if (target.status === "followed_up") item.followUpCount += 1;
+      if (target.status === "replied") item.repliedCount += 1;
+      if (target.status === "bounced") item.bouncedCount += 1;
+      if (target.status === "suppressed") item.suppressedCount += 1;
+      item.uniqueEmails.add(target.email.toLowerCase());
+      if (objectName) item.objects.add(objectName);
+      item.recipients.push({
+        email: target.email,
+        contactName: target.contact_name,
+        status: target.status,
+        objectRole: target.object_role,
+        campaignId: target.campaign_id,
+        campaignName: campaign?.campaign_name || null,
+        propertyId: campaign?.property_id || null,
+        objectName,
+        domain: target.domain,
+      });
+      byCompany.set(key, item);
+    }
+
+    const items = Array.from(byCompany.values())
+      .map((item) => ({
+        companyName: item.companyName,
+        firstTouchCount: item.firstTouchCount,
+        followUpCount: item.followUpCount,
+        repliedCount: item.repliedCount,
+        bouncedCount: item.bouncedCount,
+        suppressedCount: item.suppressedCount,
+        uniqueEmailCount: item.uniqueEmails.size,
+        objects: Array.from(item.objects).sort(),
+        recipients: item.recipients.sort((a, b) =>
+          String(a.objectName || "").localeCompare(String(b.objectName || "")) ||
+          String(a.email || "").localeCompare(String(b.email || "")),
+        ),
+      }))
+      .sort((a, b) =>
+        (b.firstTouchCount + b.followUpCount) - (a.firstTouchCount + a.followUpCount) ||
+        a.companyName.localeCompare(b.companyName),
+      );
+
+    return { items: items.slice(0, limit), total: items.length };
+  });
+
+  server.get<{ Querystring: ListQuery }>("/company-directory", async (request, reply) => {
+    const limit = normalizeLimit(request.query.limit, 100);
+    const q = normalizeString(request.query.q, 120);
+    const region = normalizeString(request.query.region, 120);
+    const rubric = normalizeString(request.query.rubric, 120);
+    let query = server.db
+      .from("broker_company_directory")
+      .select(
+        "id,company_name,email,site_title,company_type,city,city_district,region,federal_district,rubric,subrubric,subrubric_type,coordinates,working_hours,timezone,business_status,internet_rating,review_count_estimate,domain,source,source_file,import_batch,created_at,updated_at",
+        { count: "exact" },
+      )
+      .order("company_name", { ascending: true })
+      .limit(limit);
+
+    if (region) {
+      query = query.eq("region", region);
+    }
+    if (rubric) {
+      query = query.eq("rubric", rubric);
+    }
+    if (q) {
+      const like = `%${escapeLike(q)}%`;
+      query = query.or([
+        `company_name.ilike.${like}`,
+        `email.ilike.${like}`,
+        `city.ilike.${like}`,
+        `region.ilike.${like}`,
+        `rubric.ilike.${like}`,
+        `subrubric.ilike.${like}`,
+      ].join(","));
+    }
+
+    const { data, error, count } = await query.returns<CompanyDirectoryRow[]>();
+    if (error) return reply.status(500).send({ error: error.message });
+    return { items: data ?? [], total: count ?? data?.length ?? 0 };
   });
 
   server.post<{ Body: DealBody }>("/deals", async (request, reply) => {
@@ -434,7 +645,7 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     const q = normalizeString(request.query.q, 120);
     let query = server.db
       .from("broker_campaigns")
-      .select("*")
+      .select("*", { count: "exact" })
       .order("updated_at", { ascending: false })
       .limit(limit);
 
@@ -452,9 +663,9 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       ].join(","));
     }
 
-    const { data, error } = await query;
+    const { data, error, count } = await query;
     if (error) return reply.status(500).send({ error: error.message });
-    return { items: data ?? [] };
+    return { items: data ?? [], total: count ?? data?.length ?? 0 };
   });
 
   server.post<{ Body: CampaignBody }>("/campaigns", async (request, reply) => {
@@ -717,6 +928,14 @@ function normalizeLimit(value: unknown, fallback: number) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(1, Math.min(300, Math.round(parsed)));
+}
+
+function unique<T>(items: T[]) {
+  return Array.from(new Set(items));
+}
+
+function isFirstTouchStatus(status: string) {
+  return status === "sent" || status === "followed_up" || status === "replied" || status === "bounced";
 }
 
 function escapeLike(value: string) {

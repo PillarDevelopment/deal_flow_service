@@ -1,6 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { getOptionalEnv } from "../env.js";
 
+type BrokerLoginBody = {
+  email?: string;
+  password?: string;
+};
+
 const STAGES = [
   ["new_lead", "Новый лид"],
   ["contacted", "Контакт установлен"],
@@ -16,6 +21,42 @@ const STAGES = [
 export async function brokerUiRoutes(server: FastifyInstance) {
   server.get("/broker", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(renderBrokerPage());
+  });
+
+  server.post<{ Body: BrokerLoginBody }>("/broker/login", async (request, reply) => {
+    const email = String(request.body?.email || "").trim().toLowerCase();
+    const password = String(request.body?.password || "");
+    if (!email || !password) {
+      return reply.status(400).send({ error: "Введите email и пароль" });
+    }
+
+    const { data, error } = await server.auth.auth.signInWithPassword({ email, password });
+    const token = data.session?.access_token;
+    const user = data.user;
+    if (error || !token || !user) {
+      return reply.status(401).send({ error: "Не авторизован" });
+    }
+
+    const { data: roleRow, error: roleError } = await server.db
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", user.id)
+      .maybeSingle<{ role: string }>();
+    if (roleError) {
+      return reply.status(500).send({ error: roleError.message });
+    }
+    if (roleRow?.role !== "super_admin") {
+      return reply.status(403).send({ error: "Доступ только для super_admin" });
+    }
+
+    return {
+      access_token: token,
+      user: {
+        id: user.id,
+        email: user.email || email,
+        role: roleRow.role,
+      },
+    };
   });
 }
 
@@ -172,6 +213,21 @@ function renderBrokerPage() {
         align-items: start;
         margin-bottom: 18px;
       }
+      .outreach-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 12px;
+      }
+      .recipient-list {
+        display: grid;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      .recipient-row {
+        border-top: 1px solid rgba(223,214,199,0.72);
+        padding-top: 7px;
+        font-size: 13px;
+      }
       .stack {
         display: grid;
         gap: 12px;
@@ -259,6 +315,15 @@ function renderBrokerPage() {
         color: var(--muted);
         font-size: 13px;
       }
+      .access-form {
+        display: grid;
+        gap: 10px;
+      }
+      .access-divider {
+        height: 1px;
+        background: var(--line);
+        margin: 4px 0;
+      }
       @media (max-width: 980px) {
         .hero,
         .grid,
@@ -293,11 +358,19 @@ function renderBrokerPage() {
             <div class="stat"><span>Клиенты</span><strong id="clientsCount">0</strong></div>
             <div class="stat"><span>Сделки</span><strong id="dealsCount">0</strong></div>
             <div class="stat"><span>Кампании</span><strong id="campaignsCount">0</strong></div>
+            <div class="stat"><span>Единая база</span><strong id="companyDirectoryCount">0</strong></div>
           </div>
         </div>
         <div class="panel">
           <h2>Доступ</h2>
-          <p class="small">Используется тот же platform_token, что и в deal_worker. Если токена нет, войдите в основную платформу и откройте /broker снова.</p>
+          <p class="small">Войдите под super_admin. Токен сохранится для этого адреса и портa.</p>
+          <div class="access-form">
+            <input id="loginEmailInput" type="email" autocomplete="username" placeholder="Email" />
+            <input id="loginPasswordInput" type="password" autocomplete="current-password" placeholder="Пароль" />
+            <button class="btn primary" id="brokerLoginBtn">Войти</button>
+          </div>
+          <div class="access-divider"></div>
+          <p class="small">Можно также вставить готовый platform_token.</p>
           <div class="row">
             <input id="platformTokenInput" placeholder="platform_token" />
             <button class="btn" id="savePlatformTokenBtn">Token</button>
@@ -305,6 +378,30 @@ function renderBrokerPage() {
           <button class="btn danger" id="clearPlatformTokenBtn">Сбросить token</button>
           <div class="message" id="globalMsg"></div>
         </div>
+      </section>
+
+      <section class="panel stack" style="margin-bottom:18px;">
+        <div class="row">
+          <div>
+            <h2>Единая база компаний</h2>
+            <div class="small">Справочник компаний для отбора новых target lists без засорения CRM-лидов.</div>
+          </div>
+          <input id="companyDirectorySearchInput" placeholder="Найти компанию, email, рубрику, регион" />
+        </div>
+        <div class="small" id="companyDirectorySummaryMeta"></div>
+        <div id="companyDirectoryList" class="outreach-grid"></div>
+      </section>
+
+      <section class="panel stack" style="margin-bottom:18px;">
+        <div class="row">
+          <div>
+            <h2>Outreach по компаниям</h2>
+            <div class="small">Сколько первых писем и follow-up ушло по каждой компании, на какие email и по каким объектам.</div>
+          </div>
+          <input id="outreachSearchInput" placeholder="Найти компанию или email" />
+        </div>
+        <div class="small" id="outreachSummaryMeta"></div>
+        <div id="outreachCompaniesList" class="outreach-grid"></div>
       </section>
 
       <section class="campaign-grid">
@@ -414,6 +511,13 @@ function renderBrokerPage() {
         clients: [],
         deals: [],
         campaigns: [],
+        outreachCompanies: [],
+        companyDirectory: [],
+        clientsTotal: 0,
+        dealsTotal: 0,
+        campaignsTotal: 0,
+        outreachCompaniesTotal: 0,
+        companyDirectoryTotal: 0,
         selectedClientId: "",
         selectedDealId: "",
         selectedCampaignId: "",
@@ -466,16 +570,33 @@ function renderBrokerPage() {
         const q = $("clientSearchInput").value.trim();
         const payload = await apiFetch("/broker/clients?" + new URLSearchParams({ q, limit: "100" }).toString());
         state.clients = payload.items || [];
+        state.clientsTotal = Number(payload.total ?? state.clients.length);
       }
 
       async function loadDeals() {
         const payload = await apiFetch("/broker/deals?limit=200");
         state.deals = payload.items || [];
+        state.dealsTotal = Number(payload.total ?? state.deals.length);
       }
 
       async function loadCampaigns() {
         const payload = await apiFetch("/broker/campaigns?limit=100");
         state.campaigns = payload.items || [];
+        state.campaignsTotal = Number(payload.total ?? state.campaigns.length);
+      }
+
+      async function loadOutreachCompanies() {
+        const q = $("outreachSearchInput").value.trim();
+        const payload = await apiFetch("/broker/outreach/companies?" + new URLSearchParams({ q, limit: "250" }).toString());
+        state.outreachCompanies = payload.items || [];
+        state.outreachCompaniesTotal = Number(payload.total ?? state.outreachCompanies.length);
+      }
+
+      async function loadCompanyDirectory() {
+        const q = $("companyDirectorySearchInput").value.trim();
+        const payload = await apiFetch("/broker/company-directory?" + new URLSearchParams({ q, limit: "100" }).toString());
+        state.companyDirectory = payload.items || [];
+        state.companyDirectoryTotal = Number(payload.total ?? state.companyDirectory.length);
       }
 
       async function loadSelectedDeal() {
@@ -498,19 +619,58 @@ function renderBrokerPage() {
         $("globalMsg").textContent = "Загружаем Deal Flow...";
         try {
           await loadMe();
-          await Promise.all([loadClients(), loadDeals(), loadCampaigns()]);
+          await Promise.all([loadClients(), loadDeals(), loadCampaigns(), loadOutreachCompanies(), loadCompanyDirectory()]);
           if (state.selectedDealId) await loadSelectedDeal();
           if (state.selectedCampaignId) await loadSelectedCampaign();
           renderAll();
           $("globalMsg").textContent = "Готово.";
         } catch (err) {
+          if (/Не авторизован|Доступ только/.test(err.message || "")) {
+            $("authBadge").textContent = "Требуется вход";
+            state.me = null;
+            state.clients = [];
+            state.deals = [];
+            state.campaigns = [];
+            state.outreachCompanies = [];
+            state.companyDirectory = [];
+            state.clientsTotal = 0;
+            state.dealsTotal = 0;
+            state.campaignsTotal = 0;
+            state.outreachCompaniesTotal = 0;
+            state.companyDirectoryTotal = 0;
+            state.selectedDeal = null;
+            state.selectedCampaign = null;
+          }
           $("globalMsg").textContent = "Ошибка: " + err.message;
           renderAll();
         }
       }
 
+      async function loginBroker() {
+        const email = $("loginEmailInput").value.trim();
+        const password = $("loginPasswordInput").value;
+        if (!email || !password) {
+          $("globalMsg").textContent = "Введите email и пароль.";
+          return;
+        }
+        $("globalMsg").textContent = "Проверяем доступ...";
+        const payload = await fetch("/broker/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        }).then(async (response) => {
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.error || ("Код " + response.status));
+          return data;
+        });
+        state.token = payload.access_token || "";
+        localStorage.setItem("platform_token", state.token);
+        $("loginPasswordInput").value = "";
+        await refreshAll();
+      }
+
       function renderClients() {
-        $("clientsCount").textContent = String(state.clients.length);
+        $("clientsCount").textContent = String(state.clientsTotal || state.clients.length);
         $("clientsList").innerHTML = state.clients.length
           ? state.clients.map((client) =>
             '<article class="client-card' + (client.id === state.selectedClientId ? ' active' : '') + '" data-client-id="' + escapeHtml(client.id) + '">' +
@@ -523,7 +683,7 @@ function renderBrokerPage() {
       }
 
       function renderBoard() {
-        $("dealsCount").textContent = String(state.deals.length);
+        $("dealsCount").textContent = String(state.dealsTotal || state.deals.length);
         $("board").innerHTML = STAGES.map(([stage, label]) => {
           const deals = state.deals.filter((deal) => deal.stage === stage);
           return '<section class="column">' +
@@ -541,7 +701,7 @@ function renderBrokerPage() {
       }
 
       function renderCampaigns() {
-        $("campaignsCount").textContent = String(state.campaigns.length);
+        $("campaignsCount").textContent = String(state.campaignsTotal || state.campaigns.length);
         $("campaignsList").innerHTML = state.campaigns.length
           ? state.campaigns.map((campaign) =>
             '<article class="campaign-card' + (campaign.id === state.selectedCampaignId ? ' active' : '') + '" data-campaign-id="' + escapeHtml(campaign.id) + '">' +
@@ -551,6 +711,54 @@ function renderBrokerPage() {
             '</article>'
           ).join("")
           : '<div class="small">Кампаний пока нет.</div>';
+      }
+
+      function renderCompanyDirectory() {
+        $("companyDirectoryCount").textContent = String(state.companyDirectoryTotal || state.companyDirectory.length);
+        $("companyDirectorySummaryMeta").textContent = state.companyDirectoryTotal
+          ? "Компаний в общей базе: " + state.companyDirectoryTotal + ". Показано: " + state.companyDirectory.length + "."
+          : "Единая база компаний пока пустая.";
+        $("companyDirectoryList").innerHTML = state.companyDirectory.length
+          ? state.companyDirectory.map((company) =>
+            '<article class="campaign-card">' +
+              '<strong>' + escapeHtml(company.company_name || "Без названия") + '</strong>' +
+              '<div class="small" style="margin-top:8px;">' + escapeHtml(company.email || "") + '</div>' +
+              '<div class="row" style="margin-top:8px;">' +
+                '<span class="badge">' + escapeHtml(company.region || "Без региона") + '</span>' +
+                '<span class="badge">' + escapeHtml(company.rubric || "Без рубрики") + '</span>' +
+              '</div>' +
+              '<div class="small" style="margin-top:8px;">' + escapeHtml([company.city, company.subrubric].filter(Boolean).join(" · ") || "Детали не указаны") + '</div>' +
+            '</article>'
+          ).join("")
+          : '<div class="small">Нет компаний по текущему фильтру.</div>';
+      }
+
+      function renderOutreachCompanies() {
+        $("outreachSummaryMeta").textContent = state.outreachCompaniesTotal
+          ? "Компаний в outreach: " + state.outreachCompaniesTotal + ". Показано: " + state.outreachCompanies.length + "."
+          : "Outreach по компаниям пока пуст.";
+        $("outreachCompaniesList").innerHTML = state.outreachCompanies.length
+          ? state.outreachCompanies.map((company) => {
+            const recipients = Array.isArray(company.recipients) ? company.recipients : [];
+            const preview = recipients.slice(0, 8).map((recipient) =>
+              '<div class="recipient-row">' +
+                '<strong>' + escapeHtml(recipient.email || "") + '</strong>' +
+                '<div class="small">' + escapeHtml(recipient.objectName || recipient.campaignName || "Объект не указан") + ' · ' + escapeHtml(recipient.status || "") + '</div>' +
+              '</div>'
+            ).join("");
+            const hiddenCount = Math.max(0, recipients.length - 8);
+            return '<article class="campaign-card">' +
+              '<strong>' + escapeHtml(company.companyName || "Без компании") + '</strong>' +
+              '<div class="row" style="margin-top:8px;">' +
+                '<span class="badge">первые: ' + escapeHtml(company.firstTouchCount || 0) + '</span>' +
+                '<span class="badge">follow-up: ' + escapeHtml(company.followUpCount || 0) + '</span>' +
+                '<span class="badge">email: ' + escapeHtml(company.uniqueEmailCount || 0) + '</span>' +
+              '</div>' +
+              '<div class="small" style="margin-top:8px;">' + escapeHtml((company.objects || []).join(" · ") || "Объекты не указаны") + '</div>' +
+              '<div class="recipient-list">' + preview + (hiddenCount ? '<div class="small">Еще ' + hiddenCount + ' получателей.</div>' : '') + '</div>' +
+            '</article>';
+          }).join("")
+          : '<div class="small">Нет компаний по текущему фильтру.</div>';
       }
 
       function renderCampaignPropertyResults() {
@@ -645,8 +853,13 @@ function renderBrokerPage() {
 
       function renderAll() {
         $("platformTokenInput").value = state.token ? "token сохранен" : "";
+        $("loginEmailInput").classList.toggle("hidden", Boolean(state.token && state.me));
+        $("loginPasswordInput").classList.toggle("hidden", Boolean(state.token && state.me));
+        $("brokerLoginBtn").classList.toggle("hidden", Boolean(state.token && state.me));
+        renderCompanyDirectory();
         renderClients();
         renderCampaigns();
+        renderOutreachCompanies();
         renderCampaignPropertyResults();
         renderCampaignDetail();
         renderBoard();
@@ -832,8 +1045,24 @@ function renderBrokerPage() {
           localStorage.removeItem("platform_token");
           state.token = "";
           state.me = null;
+          state.clients = [];
+          state.deals = [];
+          state.campaigns = [];
+          state.outreachCompanies = [];
+          state.companyDirectory = [];
+          state.clientsTotal = 0;
+          state.dealsTotal = 0;
+          state.campaignsTotal = 0;
+          state.outreachCompaniesTotal = 0;
+          state.companyDirectoryTotal = 0;
           renderAll();
           $("globalMsg").textContent = "Token сброшен.";
+        });
+        $("brokerLoginBtn").addEventListener("click", () => loginBroker().catch((err) => $("globalMsg").textContent = "Ошибка авторизации: " + err.message));
+        $("loginPasswordInput").addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            loginBroker().catch((err) => $("globalMsg").textContent = "Ошибка авторизации: " + err.message);
+          }
         });
         $("newClientFocusBtn").addEventListener("click", () => $("clientNameInput").focus());
         $("createClientBtn").addEventListener("click", () => createClient().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
@@ -846,6 +1075,8 @@ function renderBrokerPage() {
         $("refreshCampaignsBtn").addEventListener("click", () => Promise.all([loadCampaigns(), state.selectedCampaignId ? loadSelectedCampaign() : Promise.resolve()]).then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
         $("addHypothesisBtn").addEventListener("click", () => addHypothesis().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
         $("clientSearchInput").addEventListener("input", () => loadClients().then(renderClients).catch(() => null));
+        $("companyDirectorySearchInput").addEventListener("input", () => loadCompanyDirectory().then(renderCompanyDirectory).catch(() => null));
+        $("outreachSearchInput").addEventListener("input", () => loadOutreachCompanies().then(renderOutreachCompanies).catch(() => null));
         document.body.addEventListener("click", (event) => {
           const campaignPropertyCard = event.target.closest("[data-campaign-property-id]");
           if (campaignPropertyCard) {

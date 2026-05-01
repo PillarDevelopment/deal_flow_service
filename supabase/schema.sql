@@ -168,6 +168,35 @@ create table if not exists public.broker_campaign_targets (
   )
 );
 
+create table if not exists public.broker_company_directory (
+  id uuid primary key default gen_random_uuid(),
+  company_name text not null,
+  email text not null,
+  site_title text,
+  company_type text,
+  city text,
+  city_district text,
+  region text,
+  federal_district text,
+  rubric text,
+  subrubric text,
+  subrubric_type text,
+  coordinates text,
+  working_hours text,
+  timezone text,
+  business_status text,
+  internet_rating text,
+  review_count_estimate text,
+  domain text,
+  source text not null default 'companies_may_csv',
+  source_file text,
+  import_batch text,
+  raw jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint broker_company_directory_email_company_unique unique (email, company_name)
+);
+
 create table if not exists public.broker_message_threads (
   id uuid primary key default gen_random_uuid(),
   campaign_id uuid not null references public.broker_campaigns(id) on delete cascade,
@@ -329,6 +358,12 @@ create index if not exists broker_campaigns_property_id_idx on public.broker_cam
 create index if not exists broker_campaigns_status_idx on public.broker_campaigns(status);
 create index if not exists broker_campaign_hypotheses_campaign_id_idx on public.broker_campaign_hypotheses(campaign_id);
 create index if not exists broker_campaign_targets_campaign_id_idx on public.broker_campaign_targets(campaign_id);
+create index if not exists broker_company_directory_email_idx on public.broker_company_directory(email);
+create index if not exists broker_company_directory_region_idx on public.broker_company_directory(region);
+create index if not exists broker_company_directory_rubric_idx on public.broker_company_directory(rubric);
+create index if not exists broker_company_directory_search_idx on public.broker_company_directory using gin (
+  to_tsvector('simple', coalesce(company_name, '') || ' ' || coalesce(email, '') || ' ' || coalesce(city, '') || ' ' || coalesce(region, '') || ' ' || coalesce(rubric, '') || ' ' || coalesce(subrubric, ''))
+);
 create index if not exists broker_message_threads_campaign_id_idx on public.broker_message_threads(campaign_id, created_at desc);
 create index if not exists broker_message_versions_thread_id_idx on public.broker_message_versions(thread_id, version_number desc);
 create index if not exists broker_sequence_steps_thread_id_idx on public.broker_sequence_steps(thread_id, step_order);
@@ -377,6 +412,11 @@ for each row execute function public.broker_set_updated_at();
 drop trigger if exists broker_campaign_targets_set_updated_at on public.broker_campaign_targets;
 create trigger broker_campaign_targets_set_updated_at
 before update on public.broker_campaign_targets
+for each row execute function public.broker_set_updated_at();
+
+drop trigger if exists broker_company_directory_set_updated_at on public.broker_company_directory;
+create trigger broker_company_directory_set_updated_at
+before update on public.broker_company_directory
 for each row execute function public.broker_set_updated_at();
 
 drop trigger if exists broker_message_threads_set_updated_at on public.broker_message_threads;
