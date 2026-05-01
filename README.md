@@ -122,6 +122,7 @@ supabase/schema.sql
 - `POST /broker/campaigns/:id/hypotheses`
 - `PATCH /broker/campaign-hypotheses/:id`
 - `GET /broker/company-directory`
+- `GET /broker/company-registry`
 
 ## Проверка MVP
 

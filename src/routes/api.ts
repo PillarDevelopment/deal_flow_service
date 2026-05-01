@@ -88,6 +88,16 @@ type CampaignHypothesisBody = {
   reasoning?: string;
 };
 
+type CompanyPlaybookBody = {
+  companyName?: string;
+  status?: string;
+  subject?: string;
+  letterBody?: string;
+  pingOne?: string;
+  pingTwo?: string;
+  pingThree?: string;
+};
+
 type CampaignTargetRow = {
   id: string;
   campaign_id: string;
@@ -138,6 +148,35 @@ type CompanyDirectoryRow = {
   source: string;
   source_file: string | null;
   import_batch: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type BrokerClientIndexRow = {
+  id: string;
+  full_name: string;
+  company: string | null;
+  email: string | null;
+  updated_at: string;
+};
+
+type BrokerDealIndexRow = {
+  id: string;
+  client_id: string;
+  stage: string;
+  updated_at: string;
+};
+
+type CompanyPlaybookRow = {
+  id: string;
+  company_key: string;
+  company_name: string;
+  status: string;
+  subject: string | null;
+  letter_body: string | null;
+  ping_one: string | null;
+  ping_two: string | null;
+  ping_three: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -348,6 +387,7 @@ export async function brokerApiRoutes(server: FastifyInstance) {
 
     const items = Array.from(byCompany.values())
       .map((item) => ({
+        companyKey: normalizeString(item.companyName, 240).toLowerCase(),
         companyName: item.companyName,
         firstTouchCount: item.firstTouchCount,
         followUpCount: item.followUpCount,
@@ -404,6 +444,214 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     const { data, error, count } = await query.returns<CompanyDirectoryRow[]>();
     if (error) return reply.status(500).send({ error: error.message });
     return { items: data ?? [], total: count ?? data?.length ?? 0 };
+  });
+
+  server.get<{ Querystring: ListQuery }>("/company-registry", async (request, reply) => {
+    const limit = normalizeLimit(request.query.limit, 60);
+    const q = normalizeString(request.query.q, 120);
+    const fetchLimit = Math.min(limit * 12, 1800);
+    let directoryQuery = server.db
+      .from("broker_company_directory")
+      .select(
+        "id,company_name,email,site_title,company_type,city,city_district,region,federal_district,rubric,subrubric,subrubric_type,coordinates,working_hours,timezone,business_status,internet_rating,review_count_estimate,domain,source,source_file,import_batch,created_at,updated_at",
+        { count: "exact" },
+      )
+      .order("company_name", { ascending: true })
+      .limit(fetchLimit);
+
+    if (q) {
+      const like = `%${escapeLike(q)}%`;
+      directoryQuery = directoryQuery.or([
+        `company_name.ilike.${like}`,
+        `email.ilike.${like}`,
+        `city.ilike.${like}`,
+        `region.ilike.${like}`,
+        `rubric.ilike.${like}`,
+        `subrubric.ilike.${like}`,
+      ].join(","));
+    }
+
+    const { data: directoryRows, error: directoryError, count: directoryEntryTotal } = await directoryQuery.returns<CompanyDirectoryRow[]>();
+    if (directoryError) return reply.status(500).send({ error: directoryError.message });
+
+    const grouped = new Map<string, {
+      companyKey: string;
+      companyName: string;
+      emails: Set<string>;
+      domains: Set<string>;
+      cities: Set<string>;
+      regions: Set<string>;
+      rubrics: Set<string>;
+      subrubrics: Set<string>;
+      latestUpdatedAt: string;
+    }>();
+
+    for (const row of directoryRows || []) {
+      const companyKey = companyRegistryKey(row.company_name, row.email);
+      const existing = grouped.get(companyKey) || {
+        companyKey,
+        companyName: row.company_name,
+        emails: new Set<string>(),
+        domains: new Set<string>(),
+        cities: new Set<string>(),
+        regions: new Set<string>(),
+        rubrics: new Set<string>(),
+        subrubrics: new Set<string>(),
+        latestUpdatedAt: row.updated_at,
+      };
+      existing.companyName = preferLongerName(existing.companyName, row.company_name);
+      existing.latestUpdatedAt = String(existing.latestUpdatedAt || "") > String(row.updated_at || "")
+        ? existing.latestUpdatedAt
+        : row.updated_at;
+      existing.emails.add(row.email.toLowerCase());
+      if (row.domain) existing.domains.add(row.domain.toLowerCase());
+      if (row.city) existing.cities.add(row.city);
+      if (row.region) existing.regions.add(row.region);
+      if (row.rubric) existing.rubrics.add(row.rubric);
+      if (row.subrubric) existing.subrubrics.add(row.subrubric);
+      grouped.set(companyKey, existing);
+    }
+
+    const directoryGroups = Array.from(grouped.values());
+    const companyNames = unique(directoryGroups.map((item) => item.companyName).filter(Boolean));
+    const emails = unique(directoryGroups.flatMap((item) => Array.from(item.emails)).filter(Boolean));
+
+    const crmClientsByCompany = new Map<string, BrokerClientIndexRow[]>();
+    const dealsByClientId = new Map<string, BrokerDealIndexRow[]>();
+    const outreachByCompanyKey = new Map<string, {
+      firstTouchCount: number;
+      followUpCount: number;
+      repliedCount: number;
+      bouncedCount: number;
+      suppressedCount: number;
+      objects: Set<string>;
+      recipients: Array<Record<string, unknown>>;
+    }>();
+
+    const crmClients = await loadRegistryClients(server, companyNames, emails);
+    for (const client of crmClients) {
+      const keys = new Set<string>();
+      if (client.company) keys.add(companyRegistryKey(client.company, client.email || ""));
+      if (client.email) keys.add(companyRegistryKey("", client.email));
+      for (const key of keys) {
+        crmClientsByCompany.set(key, [...(crmClientsByCompany.get(key) || []), client]);
+      }
+    }
+
+    const clientIds = unique(crmClients.map((client) => client.id));
+    if (clientIds.length) {
+      const { data: deals, error: dealsError } = await server.db
+        .from("broker_deals")
+        .select("id,client_id,stage,updated_at")
+        .in("client_id", clientIds)
+        .returns<BrokerDealIndexRow[]>();
+      if (dealsError) return reply.status(500).send({ error: dealsError.message });
+      for (const deal of deals || []) {
+        dealsByClientId.set(deal.client_id, [...(dealsByClientId.get(deal.client_id) || []), deal]);
+      }
+    }
+
+    const outreachTargets = await loadRegistryTargets(server, companyNames, emails);
+    const campaignIds = unique(outreachTargets.map((target) => target.campaign_id).filter(Boolean));
+    const campaignsById = new Map<string, CampaignIndexRow>();
+    const propertiesById = new Map<string, PropertyIndexRow>();
+    if (campaignIds.length) {
+      const { data: campaigns, error: campaignsError } = await server.db
+        .from("broker_campaigns")
+        .select("id,campaign_name,property_id")
+        .in("id", campaignIds)
+        .returns<CampaignIndexRow[]>();
+      if (campaignsError) return reply.status(500).send({ error: campaignsError.message });
+      for (const campaign of campaigns || []) campaignsById.set(campaign.id, campaign);
+
+      const propertyIds = unique((campaigns || []).map((campaign) => campaign.property_id).filter(Boolean));
+      if (propertyIds.length) {
+        const { data: properties, error: propertiesError } = await server.db
+          .from("properties")
+          .select("id,title,address,region")
+          .in("id", propertyIds)
+          .returns<PropertyIndexRow[]>();
+        if (propertiesError) return reply.status(500).send({ error: propertiesError.message });
+        for (const property of properties || []) propertiesById.set(property.id, property);
+      }
+    }
+
+    for (const target of outreachTargets) {
+      const companyKey = companyRegistryKey(target.company_name, target.email);
+      const item = outreachByCompanyKey.get(companyKey) || {
+        firstTouchCount: 0,
+        followUpCount: 0,
+        repliedCount: 0,
+        bouncedCount: 0,
+        suppressedCount: 0,
+        objects: new Set<string>(),
+        recipients: [],
+      };
+      const campaign = campaignsById.get(target.campaign_id);
+      const property = campaign?.property_id ? propertiesById.get(campaign.property_id) : null;
+      const objectName = property?.title || campaign?.campaign_name || "";
+      if (isFirstTouchStatus(target.status)) item.firstTouchCount += 1;
+      if (target.status === "followed_up") item.followUpCount += 1;
+      if (target.status === "replied") item.repliedCount += 1;
+      if (target.status === "bounced") item.bouncedCount += 1;
+      if (target.status === "suppressed") item.suppressedCount += 1;
+      if (objectName) item.objects.add(objectName);
+      item.recipients.push({
+        email: target.email,
+        status: target.status,
+        objectName,
+      });
+      outreachByCompanyKey.set(companyKey, item);
+    }
+
+    const items = directoryGroups
+      .map((item) => {
+        const crmClientsForCompany = dedupeById(crmClientsByCompany.get(item.companyKey) || []);
+        const deals = dedupeById(crmClientsForCompany.flatMap((client) => dealsByClientId.get(client.id) || []));
+        const outreach = outreachByCompanyKey.get(item.companyKey) || {
+          firstTouchCount: 0,
+          followUpCount: 0,
+          repliedCount: 0,
+          bouncedCount: 0,
+          suppressedCount: 0,
+          objects: new Set<string>(),
+          recipients: [],
+        };
+        return {
+          companyKey: item.companyKey,
+          companyName: item.companyName,
+          directoryEmailCount: item.emails.size,
+          emails: Array.from(item.emails).sort(),
+          domains: Array.from(item.domains).sort(),
+          cities: Array.from(item.cities).sort(),
+          regions: Array.from(item.regions).sort(),
+          rubrics: Array.from(item.rubrics).sort(),
+          subrubrics: Array.from(item.subrubrics).sort(),
+          crmClientCount: crmClientsForCompany.length,
+          crmDealCount: deals.length,
+          crmStages: unique(deals.map((deal) => deal.stage).filter(Boolean)).sort(),
+          firstTouchCount: outreach.firstTouchCount,
+          followUpCount: outreach.followUpCount,
+          repliedCount: outreach.repliedCount,
+          bouncedCount: outreach.bouncedCount,
+          suppressedCount: outreach.suppressedCount,
+          outreachObjects: Array.from(outreach.objects).sort(),
+          recipients: outreach.recipients
+            .sort((a, b) => String(a.email || "").localeCompare(String(b.email || "")))
+            .slice(0, 8),
+          latestUpdatedAt: item.latestUpdatedAt,
+        };
+      })
+      .sort((a, b) =>
+        (b.crmDealCount + b.firstTouchCount + b.followUpCount) - (a.crmDealCount + a.firstTouchCount + a.followUpCount) ||
+        a.companyName.localeCompare(b.companyName),
+      );
+
+    return {
+      items: items.slice(0, limit),
+      total: items.length,
+      directoryEntryTotal: directoryEntryTotal ?? directoryRows?.length ?? 0,
+    };
   });
 
   server.post<{ Body: DealBody }>("/deals", async (request, reply) => {
@@ -665,7 +913,16 @@ export async function brokerApiRoutes(server: FastifyInstance) {
 
     const { data, error, count } = await query;
     if (error) return reply.status(500).send({ error: error.message });
-    return { items: data ?? [], total: count ?? data?.length ?? 0 };
+    const campaigns = data ?? [];
+    const campaignIds = campaigns.map((item) => item.id).filter(Boolean);
+    const statsByCampaignId = await loadCampaignTargetStats(server, campaignIds);
+    return {
+      items: campaigns.map((campaign) => ({
+        ...campaign,
+        stats: statsByCampaignId.get(campaign.id) || emptyCampaignStats(),
+      })),
+      total: count ?? campaigns.length,
+    };
   });
 
   server.post<{ Body: CampaignBody }>("/campaigns", async (request, reply) => {
@@ -934,6 +1191,25 @@ function unique<T>(items: T[]) {
   return Array.from(new Set(items));
 }
 
+function dedupeById<T extends { id: string }>(items: T[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function companyRegistryKey(companyName: string | null | undefined, email: string | null | undefined) {
+  const name = normalizeString(companyName, 240).toLowerCase();
+  if (name) return name;
+  return normalizeString(email, 240).toLowerCase();
+}
+
+function preferLongerName(left: string, right: string) {
+  return normalizeString(right).length > normalizeString(left).length ? right : left;
+}
+
 function isFirstTouchStatus(status: string) {
   return status === "sent" || status === "followed_up" || status === "replied" || status === "bounced";
 }
@@ -961,7 +1237,12 @@ async function loadCampaignDetail(server: FastifyInstance, campaignId: string) {
   }
   if (!campaign) return null;
 
-  const [{ data: property, error: propertyError }, { data: brief, error: briefError }, { data: hypotheses, error: hypothesesError }] = await Promise.all([
+  const [
+    { data: property, error: propertyError },
+    { data: brief, error: briefError },
+    { data: hypotheses, error: hypothesesError },
+    { data: targets, error: targetsError },
+  ] = await Promise.all([
     server.db
       .from("properties")
       .select("id,title,address,region,price_rub,area_sqm,price_per_sqm,attributes,curation_status")
@@ -978,6 +1259,12 @@ async function loadCampaignDetail(server: FastifyInstance, campaignId: string) {
       .eq("campaign_id", campaignId)
       .order("priority", { ascending: false })
       .order("created_at", { ascending: false }),
+    server.db
+      .from("broker_campaign_targets")
+      .select("id,campaign_id,company_name,contact_name,email,source,object_role,domain,status,created_at,updated_at")
+      .eq("campaign_id", campaignId)
+      .order("company_name", { ascending: true })
+      .returns<CampaignTargetRow[]>(),
   ]);
 
   if (propertyError) {
@@ -989,11 +1276,162 @@ async function loadCampaignDetail(server: FastifyInstance, campaignId: string) {
   if (hypothesesError) {
     throw new Error(hypothesesError.message);
   }
+  if (targetsError) {
+    throw new Error(targetsError.message);
+  }
+
+  const stats = summarizeCampaignTargets(targets || []);
+  const companies = Array.from(groupCampaignTargetsByCompany(targets || []).values())
+    .map((item) => ({
+      companyName: item.companyName,
+      firstTouchCount: item.firstTouchCount,
+      followUpCount: item.followUpCount,
+      uniqueEmailCount: item.uniqueEmails.size,
+      recipients: item.recipients.sort((a, b) => String(a.email || "").localeCompare(String(b.email || ""))),
+    }))
+    .sort((a, b) =>
+      (b.firstTouchCount + b.followUpCount) - (a.firstTouchCount + a.followUpCount) ||
+      a.companyName.localeCompare(b.companyName),
+    );
 
   return {
     ...campaign,
     property: property ?? null,
     brief: brief ?? null,
     hypotheses: hypotheses ?? [],
+    stats,
+    targetCompanies: companies,
+    targets: targets ?? [],
   };
+}
+
+function emptyCampaignStats() {
+  return {
+    firstTouchCount: 0,
+    followUpCount: 0,
+    repliedCount: 0,
+    bouncedCount: 0,
+    suppressedCount: 0,
+    recipientCount: 0,
+    companyCount: 0,
+  };
+}
+
+function summarizeCampaignTargets(targets: CampaignTargetRow[]) {
+  const stats = emptyCampaignStats();
+  stats.recipientCount = targets.length;
+  stats.companyCount = unique(targets.map((item) => normalizeString(item.company_name, 240).toLowerCase()).filter(Boolean)).length;
+  for (const target of targets) {
+    if (isFirstTouchStatus(target.status)) stats.firstTouchCount += 1;
+    if (target.status === "followed_up") stats.followUpCount += 1;
+    if (target.status === "replied") stats.repliedCount += 1;
+    if (target.status === "bounced") stats.bouncedCount += 1;
+    if (target.status === "suppressed") stats.suppressedCount += 1;
+  }
+  return stats;
+}
+
+function groupCampaignTargetsByCompany(targets: CampaignTargetRow[]) {
+  const byCompany = new Map<string, {
+    companyName: string;
+    firstTouchCount: number;
+    followUpCount: number;
+    uniqueEmails: Set<string>;
+    recipients: Array<Record<string, unknown>>;
+  }>();
+
+  for (const target of targets) {
+    const key = normalizeString(target.company_name, 240).toLowerCase() || target.email.toLowerCase();
+    const item = byCompany.get(key) || {
+      companyName: target.company_name || target.email,
+      firstTouchCount: 0,
+      followUpCount: 0,
+      uniqueEmails: new Set<string>(),
+      recipients: [],
+    };
+    if (isFirstTouchStatus(target.status)) item.firstTouchCount += 1;
+    if (target.status === "followed_up") item.followUpCount += 1;
+    item.uniqueEmails.add(target.email.toLowerCase());
+    item.recipients.push({
+      email: target.email,
+      contactName: target.contact_name,
+      status: target.status,
+      objectRole: target.object_role,
+      companyName: target.company_name,
+    });
+    byCompany.set(key, item);
+  }
+
+  return byCompany;
+}
+
+async function loadCampaignTargetStats(server: FastifyInstance, campaignIds: string[]) {
+  const result = new Map<string, ReturnType<typeof emptyCampaignStats>>();
+  if (!campaignIds.length) return result;
+  const { data, error } = await server.db
+    .from("broker_campaign_targets")
+    .select("id,campaign_id,company_name,contact_name,email,source,object_role,domain,status,created_at,updated_at")
+    .in("campaign_id", campaignIds)
+    .returns<CampaignTargetRow[]>();
+  if (error) throw new Error(error.message);
+  const byCampaign = new Map<string, CampaignTargetRow[]>();
+  for (const row of data || []) {
+    byCampaign.set(row.campaign_id, [...(byCampaign.get(row.campaign_id) || []), row]);
+  }
+  for (const campaignId of campaignIds) {
+    result.set(campaignId, summarizeCampaignTargets(byCampaign.get(campaignId) || []));
+  }
+  return result;
+}
+
+async function loadRegistryClients(server: FastifyInstance, companyNames: string[], emails: string[]) {
+  const byId = new Map<string, BrokerClientIndexRow>();
+
+  if (emails.length) {
+    const { data: emailMatches, error: emailError } = await server.db
+      .from("broker_clients")
+      .select("id,full_name,company,email,updated_at")
+      .in("email", emails)
+      .returns<BrokerClientIndexRow[]>();
+    if (emailError) throw new Error(emailError.message);
+    for (const client of emailMatches || []) byId.set(client.id, client);
+  }
+
+  if (companyNames.length) {
+    const { data: companyMatches, error: companyError } = await server.db
+      .from("broker_clients")
+      .select("id,full_name,company,email,updated_at")
+      .in("company", companyNames)
+      .returns<BrokerClientIndexRow[]>();
+    if (companyError) throw new Error(companyError.message);
+    for (const client of companyMatches || []) byId.set(client.id, client);
+  }
+
+  return Array.from(byId.values());
+}
+
+async function loadRegistryTargets(server: FastifyInstance, companyNames: string[], emails: string[]) {
+  const byId = new Map<string, CampaignTargetRow>();
+
+  if (emails.length) {
+    const { data: emailMatches, error: emailError } = await server.db
+      .from("broker_campaign_targets")
+      .select("id,campaign_id,company_name,contact_name,email,source,object_role,domain,status,created_at,updated_at")
+      .in("email", emails)
+      .returns<CampaignTargetRow[]>();
+    if (emailError) throw new Error(emailError.message);
+    for (const target of emailMatches || []) byId.set(target.id, target);
+  }
+
+  if (companyNames.length) {
+    const { data: companyMatches, error: companyError } = await server.db
+      .from("broker_campaign_targets")
+      .select("id,campaign_id,company_name,contact_name,email,source,object_role,domain,status,created_at,updated_at")
+      .in("company_name", companyNames)
+      .returns<CampaignTargetRow[]>();
+    if (companyError) throw new Error(companyError.message);
+    for (const target of companyMatches || []) byId.set(target.id, target);
+  }
+
+  return Array.from(byId.values());
 }

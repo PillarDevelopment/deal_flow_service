@@ -197,6 +197,23 @@ create table if not exists public.broker_company_directory (
   constraint broker_company_directory_email_company_unique unique (email, company_name)
 );
 
+create table if not exists public.broker_company_playbooks (
+  id uuid primary key default gen_random_uuid(),
+  company_key text not null unique,
+  company_name text not null,
+  status text not null default 'draft',
+  subject text,
+  letter_body text,
+  ping_one text,
+  ping_two text,
+  ping_three text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint broker_company_playbooks_status_check check (
+    status in ('draft', 'running', 'paused', 'stopped')
+  )
+);
+
 create table if not exists public.broker_message_threads (
   id uuid primary key default gen_random_uuid(),
   campaign_id uuid not null references public.broker_campaigns(id) on delete cascade,
@@ -364,6 +381,7 @@ create index if not exists broker_company_directory_rubric_idx on public.broker_
 create index if not exists broker_company_directory_search_idx on public.broker_company_directory using gin (
   to_tsvector('simple', coalesce(company_name, '') || ' ' || coalesce(email, '') || ' ' || coalesce(city, '') || ' ' || coalesce(region, '') || ' ' || coalesce(rubric, '') || ' ' || coalesce(subrubric, ''))
 );
+create index if not exists broker_company_playbooks_company_key_idx on public.broker_company_playbooks(company_key);
 create index if not exists broker_message_threads_campaign_id_idx on public.broker_message_threads(campaign_id, created_at desc);
 create index if not exists broker_message_versions_thread_id_idx on public.broker_message_versions(thread_id, version_number desc);
 create index if not exists broker_sequence_steps_thread_id_idx on public.broker_sequence_steps(thread_id, step_order);
@@ -417,6 +435,11 @@ for each row execute function public.broker_set_updated_at();
 drop trigger if exists broker_company_directory_set_updated_at on public.broker_company_directory;
 create trigger broker_company_directory_set_updated_at
 before update on public.broker_company_directory
+for each row execute function public.broker_set_updated_at();
+
+drop trigger if exists broker_company_playbooks_set_updated_at on public.broker_company_playbooks;
+create trigger broker_company_playbooks_set_updated_at
+before update on public.broker_company_playbooks
 for each row execute function public.broker_set_updated_at();
 
 drop trigger if exists broker_message_threads_set_updated_at on public.broker_message_threads;

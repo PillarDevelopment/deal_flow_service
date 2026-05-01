@@ -182,6 +182,27 @@ test("broker company directory returns imported base rows", async () => {
   await app.close();
 });
 
+test("broker company registry merges directory with CRM and outreach data", async () => {
+  const app = await buildTestApp();
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/broker/company-registry?q=Логистика",
+    headers: authHeaders(),
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.items.length, 1);
+  assert.equal(body.items[0].companyName, "Склад Логистика");
+  assert.equal(body.items[0].crmClientCount, 1);
+  assert.equal(body.items[0].crmDealCount, 1);
+  assert.equal(body.items[0].firstTouchCount, 1);
+  assert.equal(body.items[0].followUpCount, 1);
+
+  await app.close();
+});
+
 test("broker campaign API creates an object campaign and manages hypotheses", async () => {
   const app = await buildTestApp();
   const headers = authHeaders();
@@ -273,14 +294,50 @@ function createStore(): Store {
       { user_id: SUPER_ADMIN_ID, role: "super_admin" },
       { user_id: ANALYST_ID, role: "analyst" },
     ],
-    broker_clients: [],
-    broker_deals: [],
+    broker_clients: [
+      {
+        id: "00000000-0000-4000-8000-000000000301",
+        full_name: "Складской контакт",
+        company: "Склад Логистика",
+        email: "hello@warehouse.example",
+        updated_at: "2026-05-01T10:00:00.000Z",
+      },
+    ],
+    broker_deals: [
+      {
+        id: "00000000-0000-4000-8000-000000000302",
+        client_id: "00000000-0000-4000-8000-000000000301",
+        title: "Сделка по складу",
+        stage: "qualified",
+        updated_at: "2026-05-01T11:00:00.000Z",
+      },
+    ],
     broker_deal_properties: [],
     broker_deal_activities: [],
-    broker_campaigns: [],
+    broker_campaigns: [
+      {
+        id: "00000000-0000-4000-8000-000000000303",
+        property_id: "00000000-0000-4000-8000-000000000102",
+        campaign_name: "Wave 1",
+        status: "completed",
+        updated_at: "2026-05-01T12:00:00.000Z",
+      },
+    ],
     broker_campaign_briefs: [],
     broker_campaign_hypotheses: [],
-    broker_campaign_targets: [],
+    broker_campaign_targets: [
+      {
+        id: "00000000-0000-4000-8000-000000000304",
+        campaign_id: "00000000-0000-4000-8000-000000000303",
+        company_name: "Склад Логистика",
+        contact_name: "Иван",
+        email: "hello@warehouse.example",
+        domain: "warehouse.example",
+        status: "followed_up",
+        created_at: "2026-05-01T12:00:00.000Z",
+        updated_at: "2026-05-01T13:00:00.000Z",
+      },
+    ],
     broker_company_directory: [
       {
         id: "00000000-0000-4000-8000-000000000201",

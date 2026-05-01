@@ -6,20 +6,12 @@ type BrokerLoginBody = {
   password?: string;
 };
 
-const STAGES = [
-  ["new_lead", "Новый лид"],
-  ["contacted", "Контакт установлен"],
-  ["qualified", "Потребность уточнена"],
-  ["objects_sent", "Объекты отправлены"],
-  ["discussion", "Идет обсуждение"],
-  ["meeting", "Показ / встреча"],
-  ["negotiation", "Переговоры"],
-  ["won", "Сделка закрыта"],
-  ["lost", "Потеряно"],
-];
-
 export async function brokerUiRoutes(server: FastifyInstance) {
   server.get("/broker", async (_request, reply) => {
+    return reply.type("text/html; charset=utf-8").send(renderBrokerPage());
+  });
+
+  server.get("/broker/object/:propertyId", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(renderBrokerPage());
   });
 
@@ -206,13 +198,6 @@ function renderBrokerPage() {
         gap: 18px;
         align-items: start;
       }
-      .campaign-grid {
-        display: grid;
-        grid-template-columns: 360px minmax(0, 1fr) 360px;
-        gap: 18px;
-        align-items: start;
-        margin-bottom: 18px;
-      }
       .outreach-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -327,7 +312,6 @@ function renderBrokerPage() {
       @media (max-width: 980px) {
         .hero,
         .grid,
-        .campaign-grid,
         .detail {
           grid-template-columns: 1fr;
         }
@@ -339,38 +323,34 @@ function renderBrokerPage() {
       <div class="topbar-inner">
         <div class="brand">
           <strong>Sector8Estate Broker</strong>
-          <span>Deal Flow CRM: клиенты, сделки, объекты и следующие шаги</span>
+          <span>Deal Flow: объекты, получатели, письма и follow-up</span>
         </div>
         <div class="actions">
           <button class="btn" id="refreshBtn">Обновить</button>
-          <button class="btn primary" id="newClientFocusBtn">Новый клиент</button>
           <span class="badge" id="authBadge">Проверяем доступ</span>
         </div>
       </div>
     </header>
 
     <main class="container">
-      <section class="hero">
+      <section class="hero" id="dashboardHero">
         <div class="panel">
           <h1>Broker Deal Flow</h1>
-          <p class="small">Первый контур CRM для брокера. Доступ только для super_admin. Объекты подтягиваются из каталога properties, CRM хранит только сделки и статусы работы.</p>
           <div class="stats">
-            <div class="stat"><span>Клиенты</span><strong id="clientsCount">0</strong></div>
-            <div class="stat"><span>Сделки</span><strong id="dealsCount">0</strong></div>
-            <div class="stat"><span>Кампании</span><strong id="campaignsCount">0</strong></div>
-            <div class="stat"><span>Единая база</span><strong id="companyDirectoryCount">0</strong></div>
+            <div class="stat"><span>Компании-объекты</span><strong id="campaignsCount">0</strong></div>
+            <div class="stat"><span>Отправлено писем</span><strong id="sentEmailsCount">0</strong></div>
+            <div class="stat"><span>Фирм в базе</span><strong id="companyDirectoryCount">0</strong></div>
+            <div class="stat"><span>Фирм с отправкой</span><strong id="contactedCompaniesCount">0</strong></div>
           </div>
         </div>
         <div class="panel">
           <h2>Доступ</h2>
-          <p class="small">Войдите под super_admin. Токен сохранится для этого адреса и портa.</p>
           <div class="access-form">
             <input id="loginEmailInput" type="email" autocomplete="username" placeholder="Email" />
             <input id="loginPasswordInput" type="password" autocomplete="current-password" placeholder="Пароль" />
             <button class="btn primary" id="brokerLoginBtn">Войти</button>
           </div>
           <div class="access-divider"></div>
-          <p class="small">Можно также вставить готовый platform_token.</p>
           <div class="row">
             <input id="platformTokenInput" placeholder="platform_token" />
             <button class="btn" id="savePlatformTokenBtn">Token</button>
@@ -380,152 +360,82 @@ function renderBrokerPage() {
         </div>
       </section>
 
-      <section class="panel stack" style="margin-bottom:18px;">
+      <section class="panel stack" id="activeCompaniesSection" style="margin-bottom:18px;">
         <div class="row">
           <div>
-            <h2>Единая база компаний</h2>
-            <div class="small">Справочник компаний для отбора новых target lists без засорения CRM-лидов.</div>
+            <h2>Активные объекты</h2>
           </div>
-          <input id="companyDirectorySearchInput" placeholder="Найти компанию, email, рубрику, регион" />
+          <input id="outreachSearchInput" placeholder="Найти объект" />
         </div>
         <div class="small" id="companyDirectorySummaryMeta"></div>
         <div id="companyDirectoryList" class="outreach-grid"></div>
       </section>
 
-      <section class="panel stack" style="margin-bottom:18px;">
-        <div class="row">
-          <div>
-            <h2>Outreach по компаниям</h2>
-            <div class="small">Сколько первых писем и follow-up ушло по каждой компании, на какие email и по каким объектам.</div>
-          </div>
-          <input id="outreachSearchInput" placeholder="Найти компанию или email" />
-        </div>
-        <div class="small" id="outreachSummaryMeta"></div>
-        <div id="outreachCompaniesList" class="outreach-grid"></div>
-      </section>
-
-      <section class="campaign-grid">
-        <aside class="panel stack">
-          <h2>Object Workbench</h2>
-          <input id="campaignPropertySearchInput" placeholder="Найти объект для кампании" />
-          <button class="btn" id="searchCampaignPropertiesBtn">Искать объект</button>
-          <div id="campaignPropertyResults" class="stack"></div>
-          <input id="campaignNameInput" placeholder="Название кампании" />
-          <textarea id="campaignObjectiveInput" placeholder="Цель кампании"></textarea>
-          <textarea id="campaignBriefInput" placeholder="Краткий бриф / sales angle"></textarea>
-          <button class="btn primary" id="createCampaignBtn">Создать кампанию</button>
-        </aside>
-
+      <section class="detail hidden" id="activeCompanySection" style="margin-top:0; margin-bottom:18px;">
         <section class="panel stack">
           <div class="row">
             <div>
-              <h2>Campaigns</h2>
-              <div class="small">Кампании привязаны к объектам из deal_worker и живут в deal_flow_service.</div>
+              <button class="btn" id="backToCompaniesBtn">Назад к объектам</button>
+              <h2 id="activeCompanyTitle">Объект</h2>
+              <div class="small" id="activeCompanyMeta">Выберите объект из списка выше.</div>
             </div>
-            <button class="btn" id="refreshCampaignsBtn">Обновить</button>
-          </div>
-          <div id="campaignsList" class="stack"></div>
-        </section>
-
-        <aside class="panel stack" id="campaignDetailPanel">
-          <h2 id="campaignDetailTitle">Hypothesis Studio</h2>
-          <div id="campaignDetailBody" class="small">Выберите кампанию.</div>
-          <input id="hypothesisSegmentNameInput" placeholder="Сегмент" />
-          <input id="hypothesisSegmentTypeInput" placeholder="Тип сегмента" />
-          <textarea id="hypothesisValuePropInput" placeholder="Value prop"></textarea>
-          <textarea id="hypothesisReasoningInput" placeholder="Почему эта гипотеза релевантна"></textarea>
-          <div class="row">
-            <input id="hypothesisChannelInput" placeholder="Канал" />
-            <input id="hypothesisPriorityInput" placeholder="Приоритет" />
-          </div>
-          <button class="btn primary" id="addHypothesisBtn">Добавить гипотезу</button>
-        </aside>
-      </section>
-
-      <section class="grid">
-        <aside class="panel stack">
-          <h2>Клиенты</h2>
-          <input id="clientSearchInput" placeholder="Поиск клиента" />
-          <div id="clientsList" class="stack"></div>
-          <h3>Новый клиент</h3>
-          <input id="clientNameInput" placeholder="ФИО / название клиента" />
-          <input id="clientCompanyInput" placeholder="Компания" />
-          <input id="clientPhoneInput" placeholder="Телефон" />
-          <input id="clientEmailInput" placeholder="Email" />
-          <input id="clientTelegramInput" placeholder="Telegram" />
-          <div class="row">
-            <input id="clientBudgetFromInput" placeholder="Бюджет от" />
-            <input id="clientBudgetToInput" placeholder="Бюджет до" />
-          </div>
-          <textarea id="clientNotesInput" placeholder="Комментарий"></textarea>
-          <button class="btn primary" id="createClientBtn">Создать клиента</button>
-        </aside>
-
-        <section class="stack">
-          <div class="panel">
             <div class="row">
-              <div>
-                <h2>Воронка сделок</h2>
-                <div class="small">Перетаскивание будет следующим шагом; сейчас стадия меняется в карточке сделки.</div>
-              </div>
-              <button class="btn primary" id="createDealBtn">Создать сделку для выбранного клиента</button>
+              <button class="btn primary" id="saveCompanyDraftBtn">Сохранить</button>
+              <button class="btn" id="startCompanyBtn">Запуск</button>
+              <button class="btn" id="pauseCompanyBtn">Пауза</button>
+              <button class="btn danger" id="stopCompanyBtn">Стоп</button>
             </div>
           </div>
-          <div class="board" id="board"></div>
+          <div class="row">
+            <span class="badge" id="activeCompanyCompaniesBadge">компании: 0</span>
+            <span class="badge" id="activeCompanyFirstTouchBadge">первые письма: 0</span>
+            <span class="badge" id="activeCompanyFollowUpBadge">follow-up: 0</span>
+            <span class="badge" id="activeCompanyRecipientsBadge">получатели: 0</span>
+            <span class="badge" id="activeCompanyStatusBadge">draft</span>
+          </div>
+          <div class="stack">
+            <h2>Письмо</h2>
+            <input id="companyLetterSubjectInput" placeholder="Тема письма" />
+            <textarea id="companyLetterBodyInput" placeholder="Основное письмо"></textarea>
+          </div>
+          <div class="stack">
+            <h2>Пинги</h2>
+            <textarea id="companyPingOneInput" placeholder="Пинг 1"></textarea>
+            <textarea id="companyPingTwoInput" placeholder="Пинг 2"></textarea>
+            <textarea id="companyPingThreeInput" placeholder="Пинг 3"></textarea>
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div>
+            <h2>Компании и получатели</h2>
+            <div class="small">Какие компании входят в объект, кому уже отправлено и сколько follow-up.</div>
+          </div>
+          <div id="activeCompanyRecipientsList" class="stack"></div>
+          <div class="row">
+            <button class="btn" id="activeCompanyPrevPageBtn">Назад</button>
+            <span class="badge" id="activeCompanyPageBadge">1 / 1</span>
+            <button class="btn" id="activeCompanyNextPageBtn">Дальше</button>
+          </div>
         </section>
       </section>
 
-      <section class="detail hidden" id="detailSection">
-        <div class="panel stack">
-          <h2 id="dealTitle">Сделка</h2>
-          <div class="row">
-            <select id="dealStageSelect"></select>
-            <input id="dealNextStepInput" placeholder="Следующий шаг" />
-          </div>
-          <div class="row">
-            <input id="dealNextDueInput" type="datetime-local" />
-            <button class="btn primary" id="saveDealBtn">Сохранить сделку</button>
-          </div>
-          <textarea id="activityCommentInput" placeholder="Добавить заметку / активность"></textarea>
-          <button class="btn" id="addActivityBtn">Добавить в timeline</button>
-          <h3>Timeline</h3>
-          <div id="activitiesList" class="stack"></div>
-        </div>
-        <aside class="panel stack">
-          <h2>Объекты сделки</h2>
-          <input id="propertySearchInput" placeholder="Найти объект в каталоге" />
-          <button class="btn" id="searchPropertiesBtn">Искать</button>
-          <div id="propertySearchResults" class="stack"></div>
-          <h3>Привязанные объекты</h3>
-          <div id="linkedPropertiesList" class="stack"></div>
-        </aside>
-      </section>
     </main>
 
     <script>
       const DEAL_WORKER_BASE_URL = ${dealWorkerBaseUrl};
-      const STAGES = ${JSON.stringify(STAGES)};
+      const OBJECT_ROUTE_PREFIX = "/broker/object/";
       const state = {
         token: localStorage.getItem("platform_token") || "",
         me: null,
-        clients: [],
-        deals: [],
         campaigns: [],
-        outreachCompanies: [],
-        companyDirectory: [],
-        clientsTotal: 0,
-        dealsTotal: 0,
         campaignsTotal: 0,
-        outreachCompaniesTotal: 0,
         companyDirectoryTotal: 0,
-        selectedClientId: "",
-        selectedDealId: "",
+        contactedCompaniesTotal: 0,
+        sentEmailsTotal: 0,
         selectedCampaignId: "",
-        selectedDeal: null,
         selectedCampaign: null,
-        propertyResults: [],
-        campaignPropertyResults: [],
-        selectedCampaignPropertyId: "",
+        activeCompanyRecipientsPage: 1,
       };
 
       const $ = (id) => document.getElementById(id);
@@ -543,13 +453,13 @@ function renderBrokerPage() {
         ));
       }
 
-      function formatMoney(value) {
-        if (!value) return "цена по запросу";
-        return new Intl.NumberFormat("ru-RU").format(Number(value)) + " ₽";
+      function propertyIdFromPath() {
+        if (!window.location.pathname.startsWith(OBJECT_ROUTE_PREFIX)) return "";
+        return decodeURIComponent(window.location.pathname.slice(OBJECT_ROUTE_PREFIX.length)).trim();
       }
 
-      function stageLabel(stage) {
-        return (STAGES.find((item) => item[0] === stage) || [stage, stage])[1];
+      function objectUrl(propertyId) {
+        return propertyId ? OBJECT_ROUTE_PREFIX + encodeURIComponent(propertyId) : "/broker";
       }
 
       async function apiFetch(url, options = {}) {
@@ -566,45 +476,30 @@ function renderBrokerPage() {
         $("authBadge").textContent = state.me?.email || "super_admin";
       }
 
-      async function loadClients() {
-        const q = $("clientSearchInput").value.trim();
-        const payload = await apiFetch("/broker/clients?" + new URLSearchParams({ q, limit: "100" }).toString());
-        state.clients = payload.items || [];
-        state.clientsTotal = Number(payload.total ?? state.clients.length);
-      }
-
-      async function loadDeals() {
-        const payload = await apiFetch("/broker/deals?limit=200");
-        state.deals = payload.items || [];
-        state.dealsTotal = Number(payload.total ?? state.deals.length);
-      }
-
       async function loadCampaigns() {
-        const payload = await apiFetch("/broker/campaigns?limit=100");
+        const q = $("outreachSearchInput").value.trim();
+        const payload = await apiFetch("/broker/campaigns?" + new URLSearchParams({ q, limit: "100" }).toString());
         state.campaigns = payload.items || [];
         state.campaignsTotal = Number(payload.total ?? state.campaigns.length);
-      }
-
-      async function loadOutreachCompanies() {
-        const q = $("outreachSearchInput").value.trim();
-        const payload = await apiFetch("/broker/outreach/companies?" + new URLSearchParams({ q, limit: "250" }).toString());
-        state.outreachCompanies = payload.items || [];
-        state.outreachCompaniesTotal = Number(payload.total ?? state.outreachCompanies.length);
-      }
-
-      async function loadCompanyDirectory() {
-        const q = $("companyDirectorySearchInput").value.trim();
-        const payload = await apiFetch("/broker/company-directory?" + new URLSearchParams({ q, limit: "100" }).toString());
-        state.companyDirectory = payload.items || [];
-        state.companyDirectoryTotal = Number(payload.total ?? state.companyDirectory.length);
-      }
-
-      async function loadSelectedDeal() {
-        if (!state.selectedDealId) {
-          state.selectedDeal = null;
-          return;
+        if (state.selectedCampaignId && !state.campaigns.some((item) => item.id === state.selectedCampaignId)) {
+          state.selectedCampaignId = "";
+          state.selectedCampaign = null;
         }
-        state.selectedDeal = await apiFetch("/broker/deals/" + encodeURIComponent(state.selectedDealId));
+      }
+
+      async function loadDashboardSummary() {
+        const [allCampaigns, directorySummary, outreachSummary] = await Promise.all([
+          apiFetch("/broker/campaigns?limit=100"),
+          apiFetch("/broker/company-directory?limit=1"),
+          apiFetch("/broker/outreach/companies?limit=1"),
+        ]);
+        const allCampaignItems = Array.isArray(allCampaigns.items) ? allCampaigns.items : [];
+        state.sentEmailsTotal = allCampaignItems.reduce((sum, campaign) => {
+          const stats = campaign?.stats || {};
+          return sum + Number(stats.firstTouchCount || 0) + Number(stats.followUpCount || 0);
+        }, 0);
+        state.companyDirectoryTotal = Number(directorySummary.total || 0);
+        state.contactedCompaniesTotal = Number(outreachSummary.total || 0);
       }
 
       async function loadSelectedCampaign() {
@@ -615,12 +510,41 @@ function renderBrokerPage() {
         state.selectedCampaign = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaignId));
       }
 
+      async function syncSelectionFromPath() {
+        const propertyId = propertyIdFromPath();
+        if (!propertyId) {
+          state.selectedCampaignId = "";
+          state.selectedCampaign = null;
+          state.activeCompanyRecipientsPage = 1;
+          return;
+        }
+        const existing = state.campaigns.find((item) => item.property_id === propertyId || item.property?.id === propertyId);
+        if (existing) {
+          state.selectedCampaignId = existing.id;
+          state.activeCompanyRecipientsPage = 1;
+          return;
+        }
+        const payload = await apiFetch("/broker/campaigns?" + new URLSearchParams({ propertyId, limit: "1" }).toString());
+        const first = Array.isArray(payload.items) ? payload.items[0] : null;
+        if (!first) {
+          state.selectedCampaignId = "";
+          state.selectedCampaign = null;
+          state.activeCompanyRecipientsPage = 1;
+          return;
+        }
+        if (!state.campaigns.some((item) => item.id === first.id)) {
+          state.campaigns = [first, ...state.campaigns];
+        }
+        state.selectedCampaignId = first.id;
+        state.activeCompanyRecipientsPage = 1;
+      }
+
       async function refreshAll() {
         $("globalMsg").textContent = "Загружаем Deal Flow...";
         try {
           await loadMe();
-          await Promise.all([loadClients(), loadDeals(), loadCampaigns(), loadOutreachCompanies(), loadCompanyDirectory()]);
-          if (state.selectedDealId) await loadSelectedDeal();
+          await Promise.all([loadCampaigns(), loadDashboardSummary()]);
+          await syncSelectionFromPath();
           if (state.selectedCampaignId) await loadSelectedCampaign();
           renderAll();
           $("globalMsg").textContent = "Готово.";
@@ -628,17 +552,11 @@ function renderBrokerPage() {
           if (/Не авторизован|Доступ только/.test(err.message || "")) {
             $("authBadge").textContent = "Требуется вход";
             state.me = null;
-            state.clients = [];
-            state.deals = [];
             state.campaigns = [];
-            state.outreachCompanies = [];
-            state.companyDirectory = [];
-            state.clientsTotal = 0;
-            state.dealsTotal = 0;
             state.campaignsTotal = 0;
-            state.outreachCompaniesTotal = 0;
             state.companyDirectoryTotal = 0;
-            state.selectedDeal = null;
+            state.contactedCompaniesTotal = 0;
+            state.sentEmailsTotal = 0;
             state.selectedCampaign = null;
           }
           $("globalMsg").textContent = "Ошибка: " + err.message;
@@ -669,186 +587,127 @@ function renderBrokerPage() {
         await refreshAll();
       }
 
-      function renderClients() {
-        $("clientsCount").textContent = String(state.clientsTotal || state.clients.length);
-        $("clientsList").innerHTML = state.clients.length
-          ? state.clients.map((client) =>
-            '<article class="client-card' + (client.id === state.selectedClientId ? ' active' : '') + '" data-client-id="' + escapeHtml(client.id) + '">' +
-              '<strong>' + escapeHtml(client.full_name || "Без имени") + '</strong>' +
-              '<div class="small">' + escapeHtml(client.company || "Компания не указана") + '</div>' +
-              '<div class="small">' + escapeHtml([client.phone, client.email, client.telegram].filter(Boolean).join(" · ") || "Контакты не указаны") + '</div>' +
-            '</article>'
-          ).join("")
-          : '<div class="small">Клиентов пока нет.</div>';
-      }
-
-      function renderBoard() {
-        $("dealsCount").textContent = String(state.dealsTotal || state.deals.length);
-        $("board").innerHTML = STAGES.map(([stage, label]) => {
-          const deals = state.deals.filter((deal) => deal.stage === stage);
-          return '<section class="column">' +
-            '<h3><span>' + escapeHtml(label) + '</span><span class="badge">' + deals.length + '</span></h3>' +
-            deals.map((deal) =>
-              '<article class="deal-card' + (deal.id === state.selectedDealId ? ' active' : '') + '" data-deal-id="' + escapeHtml(deal.id) + '">' +
-                '<strong>' + escapeHtml(deal.title || "Без названия") + '</strong>' +
-                '<div class="small">' + escapeHtml(deal.client?.full_name || "Клиент не указан") + '</div>' +
-                '<div class="small">' + escapeHtml(deal.next_step || "Следующий шаг не задан") + '</div>' +
-                '<div class="badge">' + escapeHtml(deal.priority || "normal") + '</div>' +
-              '</article>'
-            ).join("") +
-          '</section>';
-        }).join("");
-      }
-
-      function renderCampaigns() {
-        $("campaignsCount").textContent = String(state.campaignsTotal || state.campaigns.length);
-        $("campaignsList").innerHTML = state.campaigns.length
-          ? state.campaigns.map((campaign) =>
-            '<article class="campaign-card' + (campaign.id === state.selectedCampaignId ? ' active' : '') + '" data-campaign-id="' + escapeHtml(campaign.id) + '">' +
-              '<strong>' + escapeHtml(campaign.campaign_name || "Без названия") + '</strong>' +
-              '<div class="small">' + escapeHtml(campaign.objective || "Цель не указана") + '</div>' +
-              '<div class="row"><span class="badge">' + escapeHtml(campaign.status || "draft") + '</span><span class="badge">' + escapeHtml(campaign.start_date || "без даты") + '</span></div>' +
-            '</article>'
-          ).join("")
-          : '<div class="small">Кампаний пока нет.</div>';
-      }
-
       function renderCompanyDirectory() {
-        $("companyDirectoryCount").textContent = String(state.companyDirectoryTotal || state.companyDirectory.length);
-        $("companyDirectorySummaryMeta").textContent = state.companyDirectoryTotal
-          ? "Компаний в общей базе: " + state.companyDirectoryTotal + ". Показано: " + state.companyDirectory.length + "."
-          : "Единая база компаний пока пустая.";
-        $("companyDirectoryList").innerHTML = state.companyDirectory.length
-          ? state.companyDirectory.map((company) =>
-            '<article class="campaign-card">' +
-              '<strong>' + escapeHtml(company.company_name || "Без названия") + '</strong>' +
-              '<div class="small" style="margin-top:8px;">' + escapeHtml(company.email || "") + '</div>' +
-              '<div class="row" style="margin-top:8px;">' +
-                '<span class="badge">' + escapeHtml(company.region || "Без региона") + '</span>' +
-                '<span class="badge">' + escapeHtml(company.rubric || "Без рубрики") + '</span>' +
-              '</div>' +
-              '<div class="small" style="margin-top:8px;">' + escapeHtml([company.city, company.subrubric].filter(Boolean).join(" · ") || "Детали не указаны") + '</div>' +
-            '</article>'
-          ).join("")
-          : '<div class="small">Нет компаний по текущему фильтру.</div>';
-      }
-
-      function renderOutreachCompanies() {
-        $("outreachSummaryMeta").textContent = state.outreachCompaniesTotal
-          ? "Компаний в outreach: " + state.outreachCompaniesTotal + ". Показано: " + state.outreachCompanies.length + "."
-          : "Outreach по компаниям пока пуст.";
-        $("outreachCompaniesList").innerHTML = state.outreachCompanies.length
-          ? state.outreachCompanies.map((company) => {
-            const recipients = Array.isArray(company.recipients) ? company.recipients : [];
-            const preview = recipients.slice(0, 8).map((recipient) =>
-              '<div class="recipient-row">' +
-                '<strong>' + escapeHtml(recipient.email || "") + '</strong>' +
-                '<div class="small">' + escapeHtml(recipient.objectName || recipient.campaignName || "Объект не указан") + ' · ' + escapeHtml(recipient.status || "") + '</div>' +
-              '</div>'
-            ).join("");
-            const hiddenCount = Math.max(0, recipients.length - 8);
-            return '<article class="campaign-card">' +
-              '<strong>' + escapeHtml(company.companyName || "Без компании") + '</strong>' +
-              '<div class="row" style="margin-top:8px;">' +
-                '<span class="badge">первые: ' + escapeHtml(company.firstTouchCount || 0) + '</span>' +
-                '<span class="badge">follow-up: ' + escapeHtml(company.followUpCount || 0) + '</span>' +
-                '<span class="badge">email: ' + escapeHtml(company.uniqueEmailCount || 0) + '</span>' +
-              '</div>' +
-              '<div class="small" style="margin-top:8px;">' + escapeHtml((company.objects || []).join(" · ") || "Объекты не указаны") + '</div>' +
-              '<div class="recipient-list">' + preview + (hiddenCount ? '<div class="small">Еще ' + hiddenCount + ' получателей.</div>' : '') + '</div>' +
-            '</article>';
+        $("campaignsCount").textContent = String(state.campaignsTotal || state.campaigns.length);
+        $("sentEmailsCount").textContent = String(state.sentEmailsTotal || 0);
+        $("companyDirectoryCount").textContent = String(state.companyDirectoryTotal || 0);
+        $("contactedCompaniesCount").textContent = String(state.contactedCompaniesTotal || 0);
+        $("companyDirectorySummaryMeta").textContent = state.campaignsTotal
+          ? "Объектов в работе: " + state.campaignsTotal + ". Показано: " + state.campaigns.length + "."
+          : "Активных объектов пока нет.";
+        $("companyDirectoryList").innerHTML = state.campaigns.length
+          ? state.campaigns.map((campaign) => {
+            const isActive = campaign.id === state.selectedCampaignId;
+            const stats = campaign.stats || {};
+            return (
+              '<article class="campaign-card' + (isActive ? ' active' : '') + '" data-active-campaign-id="' + escapeHtml(campaign.id || "") + '">' +
+                '<strong>' + escapeHtml(campaign.campaign_name || "Без названия") + '</strong>' +
+                '<div class="row" style="margin-top:8px;">' +
+                  '<span class="badge">первые: ' + escapeHtml(stats.firstTouchCount || 0) + '</span>' +
+                  '<span class="badge">follow-up: ' + escapeHtml(stats.followUpCount || 0) + '</span>' +
+                  '<span class="badge">получатели: ' + escapeHtml(stats.recipientCount || 0) + '</span>' +
+                '</div>' +
+                '<div class="small" style="margin-top:8px;">' + escapeHtml(campaign.objective || "Цель не указана") + '</div>' +
+                '<div class="small" style="margin-top:8px;">' + escapeHtml(campaign.property?.title || campaign.property_id || "Объект не указан") + '</div>' +
+              '</article>'
+            );
           }).join("")
-          : '<div class="small">Нет компаний по текущему фильтру.</div>';
+          : '<div class="small">Нет объектов по текущему фильтру.</div>';
       }
 
-      function renderCampaignPropertyResults() {
-        $("campaignPropertyResults").innerHTML = state.campaignPropertyResults.length
-          ? state.campaignPropertyResults.map((property) =>
-            '<div class="property-card' + (property.id === state.selectedCampaignPropertyId ? ' active' : '') + '" data-campaign-property-id="' + escapeHtml(property.id) + '">' +
-              '<strong>' + escapeHtml(property.title || "Без названия") + '</strong>' +
-              '<div class="small">' + escapeHtml(property.region || property.address || "Локация не указана") + '</div>' +
-              '<div class="small">' + escapeHtml(formatMoney(property.price_rub)) + '</div>' +
-            '</div>'
-          ).join("")
-          : '<div class="small">Найдите объект, чтобы создать кампанию.</div>';
+      function readCompanyDrafts() {
+        try {
+          return JSON.parse(localStorage.getItem("broker_company_playbooks_v1") || "{}");
+        } catch {
+          return {};
+        }
       }
 
-      function renderCampaignDetail() {
-        const detail = state.selectedCampaign;
-        $("campaignDetailTitle").textContent = detail?.campaign_name || "Hypothesis Studio";
-        if (!detail) {
-          $("campaignDetailBody").innerHTML = "Выберите кампанию.";
+      function writeCompanyDrafts(value) {
+        localStorage.setItem("broker_company_playbooks_v1", JSON.stringify(value));
+      }
+
+      function objectStatusLabel(status) {
+        return ({
+          draft: "черновик",
+          running: "в работе",
+          paused: "на паузе",
+          stopped: "остановлен",
+        })[status] || status || "черновик";
+      }
+
+      function companyDraft(key, company) {
+        const all = readCompanyDrafts();
+        const fallbackObject = company?.property?.title || "объект";
+        return all[key] || {
+          status: "draft",
+          subject: "Предложение по объекту " + fallbackObject,
+          letterBody: "Добрый день. Направляю предложение по объекту " + fallbackObject + ". Готов отправить материалы и обсудить формат.",
+          pingOne: "Возвращаюсь к письму по объекту. Подскажите, актуально ли посмотреть материалы?",
+          pingTwo: "Коротко напоминаю о предложении. Если интересно, отправлю расширенный пакет сегодня.",
+          pingThree: "Последний follow-up по этому объекту. Если тема неактуальна, зафиксирую и сниму компанию с пинга.",
+        };
+      }
+
+      function renderActiveCompanyDetail() {
+        const campaign = state.selectedCampaign;
+        const pageSize = 10;
+        $("dashboardHero").classList.toggle("hidden", Boolean(campaign));
+        $("activeCompaniesSection").classList.toggle("hidden", Boolean(campaign));
+        $("activeCompanySection").classList.toggle("hidden", !campaign);
+        if (!campaign) {
+          $("activeCompanyTitle").textContent = "Объект";
+          $("activeCompanyMeta").textContent = "Выберите объект из списка выше.";
+          $("activeCompanyCompaniesBadge").textContent = "компании: 0";
+          $("activeCompanyFirstTouchBadge").textContent = "первые письма: 0";
+          $("activeCompanyFollowUpBadge").textContent = "follow-up: 0";
+          $("activeCompanyRecipientsBadge").textContent = "получатели: 0";
+          $("activeCompanyStatusBadge").textContent = "черновик";
+          $("companyLetterSubjectInput").value = "";
+          $("companyLetterBodyInput").value = "";
+          $("companyPingOneInput").value = "";
+          $("companyPingTwoInput").value = "";
+          $("companyPingThreeInput").value = "";
+          $("activeCompanyRecipientsList").innerHTML = '<div class="small">Получатели появятся после выбора компании.</div>';
+          $("activeCompanyPageBadge").textContent = "1 / 1";
+          $("activeCompanyPrevPageBtn").disabled = true;
+          $("activeCompanyNextPageBtn").disabled = true;
           return;
         }
 
-        const property = detail.property || {};
-        const hypotheses = Array.isArray(detail.hypotheses) ? detail.hypotheses : [];
-        $("campaignDetailBody").innerHTML =
-          '<div class="stack">' +
-            '<div><strong>' + escapeHtml(property.title || "Объект не найден") + '</strong><div class="small">' + escapeHtml(property.address || property.region || "") + '</div></div>' +
-            '<div class="row"><span class="badge">' + escapeHtml(detail.status || "draft") + '</span><span class="badge">' + escapeHtml(String(hypotheses.length)) + ' гипотез</span></div>' +
-            (hypotheses.length
-              ? hypotheses.map((item) =>
-                '<div class="activity-row">' +
-                  '<strong>' + escapeHtml(item.segment_name || "Сегмент") + '</strong>' +
-                  '<div class="small">' + escapeHtml(item.segment_type || "") + ' · ' + escapeHtml(item.channel || "канал не указан") + '</div>' +
-                  '<div>' + escapeHtml(item.value_prop || "") + '</div>' +
-                  '<div class="row"><span class="badge">' + escapeHtml(item.status || "draft") + '</span><button class="btn" data-approve-hypothesis-id="' + escapeHtml(item.id) + '">Approve</button></div>' +
-                '</div>'
-              ).join("")
-              : '<div class="small">Гипотез пока нет.</div>') +
-          '</div>';
-      }
-
-      function renderDealDetail() {
-        const detail = state.selectedDeal;
-        $("detailSection").classList.toggle("hidden", !detail);
-        if (!detail) return;
-
-        $("dealTitle").textContent = detail.title || "Сделка";
-        $("dealStageSelect").innerHTML = STAGES.map(([value, label]) =>
-          '<option value="' + escapeHtml(value) + '"' + (value === detail.stage ? " selected" : "") + '>' + escapeHtml(label) + '</option>'
-        ).join("");
-        $("dealNextStepInput").value = detail.next_step || "";
-        $("dealNextDueInput").value = detail.next_step_due_at ? String(detail.next_step_due_at).slice(0, 16) : "";
-
-        const activities = Array.isArray(detail.activities) ? detail.activities : [];
-        $("activitiesList").innerHTML = activities.length
-          ? activities.map((item) =>
+        const draft = companyDraft(campaign.id, campaign);
+        const stats = campaign.stats || {};
+        const targetCompanies = Array.isArray(campaign.targetCompanies) ? campaign.targetCompanies : [];
+        const totalPages = Math.max(1, Math.ceil(targetCompanies.length / pageSize));
+        const page = Math.min(Math.max(1, state.activeCompanyRecipientsPage), totalPages);
+        state.activeCompanyRecipientsPage = page;
+        const pageItems = targetCompanies.slice((page - 1) * pageSize, page * pageSize);
+        $("activeCompanyTitle").textContent = campaign.campaign_name || "Объект";
+        $("activeCompanyMeta").textContent = (campaign.property?.title || "Объект") + " · " + (campaign.objective || "Цель не указана");
+        $("activeCompanyCompaniesBadge").textContent = "компании: " + targetCompanies.length;
+        $("activeCompanyFirstTouchBadge").textContent = "первые письма: " + (stats.firstTouchCount || 0);
+        $("activeCompanyFollowUpBadge").textContent = "follow-up: " + (stats.followUpCount || 0);
+        $("activeCompanyRecipientsBadge").textContent = "получатели: " + (stats.recipientCount || 0);
+        $("activeCompanyStatusBadge").textContent = objectStatusLabel(draft.status || "draft");
+        $("companyLetterSubjectInput").value = draft.subject || "";
+        $("companyLetterBodyInput").value = draft.letterBody || "";
+        $("companyPingOneInput").value = draft.pingOne || "";
+        $("companyPingTwoInput").value = draft.pingTwo || "";
+        $("companyPingThreeInput").value = draft.pingThree || "";
+        $("activeCompanyRecipientsList").innerHTML = targetCompanies.length
+          ? pageItems.map((company) =>
             '<div class="activity-row">' +
-              '<strong>' + escapeHtml(item.activity_type || "note") + '</strong>' +
-              '<div>' + escapeHtml(item.comment || "") + '</div>' +
-              '<div class="small">' + escapeHtml(item.created_at ? new Date(item.created_at).toLocaleString("ru-RU") : "") + '</div>' +
+              '<strong>' + escapeHtml(company.companyName || "") + '</strong>' +
+              '<div class="row"><span class="badge">первые письма: ' + escapeHtml(company.firstTouchCount || 0) + '</span><span class="badge">follow-up: ' + escapeHtml(company.followUpCount || 0) + '</span><span class="badge">email: ' + escapeHtml(company.uniqueEmailCount || 0) + '</span></div>' +
+              '<div class="recipient-list">' + (company.recipients || []).map((recipient) =>
+                '<div class="recipient-row"><strong>' + escapeHtml(recipient.email || "") + '</strong><div class="small">' + escapeHtml((recipient.contactName || "Контакт не указан") + " · " + (recipient.status || "")) + '</div></div>'
+              ).join("") + '</div>' +
             '</div>'
           ).join("")
-          : '<div class="small">Timeline пока пуст.</div>';
-
-        const linked = Array.isArray(detail.deal_properties) ? detail.deal_properties : [];
-        $("linkedPropertiesList").innerHTML = linked.length
-          ? linked.map((item) => {
-            const property = item.property || {};
-            const href = DEAL_WORKER_BASE_URL.replace(/\\/$/, "") + "/app/object/" + encodeURIComponent(property.id || item.property_id);
-            return '<div class="property-card">' +
-              '<strong>' + escapeHtml(property.title || item.property_id) + '</strong>' +
-              '<div class="small">' + escapeHtml(property.region || property.address || "Локация не указана") + '</div>' +
-              '<div class="small">' + escapeHtml(formatMoney(property.price_rub)) + '</div>' +
-              '<div class="row"><span class="badge">' + escapeHtml(item.status || "shortlist") + '</span><a class="btn" href="' + escapeHtml(href) + '" target="_blank" rel="noreferrer">Открыть объект</a></div>' +
-            '</div>';
-          }).join("")
-          : '<div class="small">Объекты еще не привязаны.</div>';
-      }
-
-      function renderPropertyResults() {
-        $("propertySearchResults").innerHTML = state.propertyResults.length
-          ? state.propertyResults.map((property) =>
-            '<div class="property-card">' +
-              '<strong>' + escapeHtml(property.title || "Без названия") + '</strong>' +
-              '<div class="small">' + escapeHtml(property.region || property.address || "Локация не указана") + '</div>' +
-              '<div class="small">' + escapeHtml(formatMoney(property.price_rub)) + '</div>' +
-              '<button class="btn primary" data-add-property-id="' + escapeHtml(property.id) + '">Добавить в сделку</button>' +
-            '</div>'
-          ).join("")
-          : '<div class="small">Введите запрос и нажмите “Искать”.</div>';
+          : '<div class="small">По объекту пока нет компаний-получателей.</div>';
+        $("activeCompanyPageBadge").textContent = page + " / " + totalPages;
+        $("activeCompanyPrevPageBtn").disabled = page <= 1;
+        $("activeCompanyNextPageBtn").disabled = page >= totalPages;
       }
 
       function renderAll() {
@@ -857,179 +716,27 @@ function renderBrokerPage() {
         $("loginPasswordInput").classList.toggle("hidden", Boolean(state.token && state.me));
         $("brokerLoginBtn").classList.toggle("hidden", Boolean(state.token && state.me));
         renderCompanyDirectory();
-        renderClients();
-        renderCampaigns();
-        renderOutreachCompanies();
-        renderCampaignPropertyResults();
-        renderCampaignDetail();
-        renderBoard();
-        renderDealDetail();
-        renderPropertyResults();
+        renderActiveCompanyDetail();
       }
 
-      async function createClient() {
-        const fullName = $("clientNameInput").value.trim();
-        if (!fullName) {
-          $("globalMsg").textContent = "Введите имя клиента.";
+      function saveActiveCompanyDraft(nextStatus) {
+        const campaign = state.selectedCampaign;
+        if (!campaign) {
+          $("globalMsg").textContent = "Сначала выберите объект.";
           return;
         }
-        const payload = {
-          fullName,
-          company: $("clientCompanyInput").value.trim(),
-          phone: $("clientPhoneInput").value.trim(),
-          email: $("clientEmailInput").value.trim(),
-          telegram: $("clientTelegramInput").value.trim(),
-          budgetFrom: $("clientBudgetFromInput").value.trim(),
-          budgetTo: $("clientBudgetToInput").value.trim(),
-          notes: $("clientNotesInput").value.trim(),
+        const all = readCompanyDrafts();
+        all[campaign.id] = {
+          status: nextStatus || companyDraft(campaign.id, campaign).status || "draft",
+          subject: $("companyLetterSubjectInput").value.trim(),
+          letterBody: $("companyLetterBodyInput").value.trim(),
+          pingOne: $("companyPingOneInput").value.trim(),
+          pingTwo: $("companyPingTwoInput").value.trim(),
+          pingThree: $("companyPingThreeInput").value.trim(),
         };
-        const client = await apiFetch("/broker/clients", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        state.selectedClientId = client.id;
-        ["clientNameInput", "clientCompanyInput", "clientPhoneInput", "clientEmailInput", "clientTelegramInput", "clientBudgetFromInput", "clientBudgetToInput", "clientNotesInput"].forEach((id) => {
-          $(id).value = "";
-        });
-        await refreshAll();
-      }
-
-      async function createDeal() {
-        if (!state.selectedClientId) {
-          $("globalMsg").textContent = "Сначала выберите клиента.";
-          return;
-        }
-        const client = state.clients.find((item) => item.id === state.selectedClientId);
-        const deal = await apiFetch("/broker/deals", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            clientId: state.selectedClientId,
-            title: "Сделка: " + (client?.full_name || "клиент"),
-          }),
-        });
-        state.selectedDealId = deal.id;
-        await refreshAll();
-      }
-
-      async function saveDeal() {
-        if (!state.selectedDealId) return;
-        await apiFetch("/broker/deals/" + encodeURIComponent(state.selectedDealId), {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            stage: $("dealStageSelect").value,
-            nextStep: $("dealNextStepInput").value.trim(),
-            nextStepDueAt: $("dealNextDueInput").value,
-          }),
-        });
-        await refreshAll();
-      }
-
-      async function addActivity() {
-        if (!state.selectedDealId) return;
-        const comment = $("activityCommentInput").value.trim();
-        if (!comment) return;
-        await apiFetch("/broker/deals/" + encodeURIComponent(state.selectedDealId) + "/activities", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ activityType: "note", comment }),
-        });
-        $("activityCommentInput").value = "";
-        await refreshAll();
-      }
-
-      async function searchProperties() {
-        const q = $("propertySearchInput").value.trim();
-        const payload = await apiFetch("/broker/catalog/properties?" + new URLSearchParams({ q, limit: "20" }).toString());
-        state.propertyResults = payload.items || [];
-        renderPropertyResults();
-      }
-
-      async function searchCampaignProperties() {
-        const q = $("campaignPropertySearchInput").value.trim();
-        const payload = await apiFetch("/broker/catalog/properties?" + new URLSearchParams({ q, limit: "10" }).toString());
-        state.campaignPropertyResults = payload.items || [];
-        renderCampaignPropertyResults();
-      }
-
-      async function createCampaign() {
-        if (!state.selectedCampaignPropertyId) {
-          $("globalMsg").textContent = "Сначала выберите объект для кампании.";
-          return;
-        }
-        const name = $("campaignNameInput").value.trim();
-        if (!name) {
-          $("globalMsg").textContent = "Введите название кампании.";
-          return;
-        }
-        const campaign = await apiFetch("/broker/campaigns", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            propertyId: state.selectedCampaignPropertyId,
-            campaignName: name,
-            objective: $("campaignObjectiveInput").value.trim(),
-            briefText: $("campaignBriefInput").value.trim(),
-          }),
-        });
-        state.selectedCampaignId = campaign.id;
-        state.selectedCampaign = campaign;
-        ["campaignNameInput", "campaignObjectiveInput", "campaignBriefInput"].forEach((id) => { $(id).value = ""; });
-        await refreshAll();
-      }
-
-      async function addHypothesis() {
-        if (!state.selectedCampaignId) {
-          $("globalMsg").textContent = "Сначала выберите кампанию.";
-          return;
-        }
-        const segmentName = $("hypothesisSegmentNameInput").value.trim();
-        const segmentType = $("hypothesisSegmentTypeInput").value.trim();
-        if (!segmentName || !segmentType) {
-          $("globalMsg").textContent = "Введите сегмент и тип сегмента.";
-          return;
-        }
-        await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaignId) + "/hypotheses", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            segmentName,
-            segmentType,
-            valueProp: $("hypothesisValuePropInput").value.trim(),
-            reasoning: $("hypothesisReasoningInput").value.trim(),
-            channel: $("hypothesisChannelInput").value.trim() || "email",
-            priority: $("hypothesisPriorityInput").value.trim(),
-          }),
-        });
-        ["hypothesisSegmentNameInput", "hypothesisSegmentTypeInput", "hypothesisValuePropInput", "hypothesisReasoningInput", "hypothesisChannelInput", "hypothesisPriorityInput"].forEach((id) => { $(id).value = ""; });
-        await loadSelectedCampaign();
-        await loadCampaigns();
-        renderAll();
-      }
-
-      async function approveHypothesis(hypothesisId) {
-        await apiFetch("/broker/campaign-hypotheses/" + encodeURIComponent(hypothesisId), {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "approved" }),
-        });
-        await loadSelectedCampaign();
-        renderAll();
-      }
-
-      async function addProperty(propertyId) {
-        if (!state.selectedDealId) {
-          $("globalMsg").textContent = "Сначала выберите сделку.";
-          return;
-        }
-        await apiFetch("/broker/deals/" + encodeURIComponent(state.selectedDealId) + "/properties", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ propertyId, status: "shortlist" }),
-        });
-        await refreshAll();
+        writeCompanyDrafts(all);
+        $("globalMsg").textContent = "Карточка объекта сохранена.";
+        renderActiveCompanyDetail();
       }
 
       function bindEvents() {
@@ -1045,16 +752,13 @@ function renderBrokerPage() {
           localStorage.removeItem("platform_token");
           state.token = "";
           state.me = null;
-          state.clients = [];
-          state.deals = [];
           state.campaigns = [];
-          state.outreachCompanies = [];
-          state.companyDirectory = [];
-          state.clientsTotal = 0;
-          state.dealsTotal = 0;
           state.campaignsTotal = 0;
-          state.outreachCompaniesTotal = 0;
           state.companyDirectoryTotal = 0;
+          state.contactedCompaniesTotal = 0;
+          state.sentEmailsTotal = 0;
+          state.selectedCampaignId = "";
+          state.selectedCampaign = null;
           renderAll();
           $("globalMsg").textContent = "Token сброшен.";
         });
@@ -1064,53 +768,43 @@ function renderBrokerPage() {
             loginBroker().catch((err) => $("globalMsg").textContent = "Ошибка авторизации: " + err.message);
           }
         });
-        $("newClientFocusBtn").addEventListener("click", () => $("clientNameInput").focus());
-        $("createClientBtn").addEventListener("click", () => createClient().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("createDealBtn").addEventListener("click", () => createDeal().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("saveDealBtn").addEventListener("click", () => saveDeal().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("addActivityBtn").addEventListener("click", () => addActivity().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("searchPropertiesBtn").addEventListener("click", () => searchProperties().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("searchCampaignPropertiesBtn").addEventListener("click", () => searchCampaignProperties().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("createCampaignBtn").addEventListener("click", () => createCampaign().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("refreshCampaignsBtn").addEventListener("click", () => Promise.all([loadCampaigns(), state.selectedCampaignId ? loadSelectedCampaign() : Promise.resolve()]).then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("addHypothesisBtn").addEventListener("click", () => addHypothesis().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
-        $("clientSearchInput").addEventListener("input", () => loadClients().then(renderClients).catch(() => null));
-        $("companyDirectorySearchInput").addEventListener("input", () => loadCompanyDirectory().then(renderCompanyDirectory).catch(() => null));
-        $("outreachSearchInput").addEventListener("input", () => loadOutreachCompanies().then(renderOutreachCompanies).catch(() => null));
+        $("saveCompanyDraftBtn").addEventListener("click", () => saveActiveCompanyDraft());
+        $("startCompanyBtn").addEventListener("click", () => saveActiveCompanyDraft("running"));
+        $("pauseCompanyBtn").addEventListener("click", () => saveActiveCompanyDraft("paused"));
+        $("stopCompanyBtn").addEventListener("click", () => saveActiveCompanyDraft("stopped"));
+        $("backToCompaniesBtn").addEventListener("click", () => {
+          state.selectedCampaignId = "";
+          state.selectedCampaign = null;
+          state.activeCompanyRecipientsPage = 1;
+          history.pushState({}, "", "/broker");
+          renderAll();
+        });
+        $("activeCompanyPrevPageBtn").addEventListener("click", () => {
+          if (state.activeCompanyRecipientsPage <= 1) return;
+          state.activeCompanyRecipientsPage -= 1;
+          renderActiveCompanyDetail();
+        });
+        $("activeCompanyNextPageBtn").addEventListener("click", () => {
+          state.activeCompanyRecipientsPage += 1;
+          renderActiveCompanyDetail();
+        });
+        $("outreachSearchInput").addEventListener("input", () => Promise.all([loadCampaigns(), state.selectedCampaignId ? loadSelectedCampaign() : Promise.resolve()]).then(renderAll).catch(() => null));
         document.body.addEventListener("click", (event) => {
-          const campaignPropertyCard = event.target.closest("[data-campaign-property-id]");
-          if (campaignPropertyCard) {
-            state.selectedCampaignPropertyId = campaignPropertyCard.getAttribute("data-campaign-property-id") || "";
-            renderCampaignPropertyResults();
-            return;
-          }
-          const campaignCard = event.target.closest("[data-campaign-id]");
-          if (campaignCard) {
-            state.selectedCampaignId = campaignCard.getAttribute("data-campaign-id") || "";
+          const activeCampaignCard = event.target.closest("[data-active-campaign-id]");
+          if (activeCampaignCard) {
+            state.selectedCampaignId = activeCampaignCard.getAttribute("data-active-campaign-id") || "";
+            state.activeCompanyRecipientsPage = 1;
+            const campaign = state.campaigns.find((item) => item.id === state.selectedCampaignId);
+            history.pushState({}, "", objectUrl(campaign?.property_id || campaign?.property?.id || ""));
             loadSelectedCampaign().then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
             return;
           }
-          const approveHypothesisButton = event.target.closest("[data-approve-hypothesis-id]");
-          if (approveHypothesisButton) {
-            approveHypothesis(approveHypothesisButton.getAttribute("data-approve-hypothesis-id")).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
-            return;
-          }
-          const clientCard = event.target.closest("[data-client-id]");
-          if (clientCard) {
-            state.selectedClientId = clientCard.getAttribute("data-client-id") || "";
-            renderAll();
-            return;
-          }
-          const dealCard = event.target.closest("[data-deal-id]");
-          if (dealCard) {
-            state.selectedDealId = dealCard.getAttribute("data-deal-id") || "";
-            loadSelectedDeal().then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
-            return;
-          }
-          const propertyButton = event.target.closest("[data-add-property-id]");
-          if (propertyButton) {
-            addProperty(propertyButton.getAttribute("data-add-property-id")).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
-          }
+        });
+        window.addEventListener("popstate", () => {
+          syncSelectionFromPath()
+            .then(() => state.selectedCampaignId ? loadSelectedCampaign() : Promise.resolve())
+            .then(renderAll)
+            .catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
         });
       }
 
