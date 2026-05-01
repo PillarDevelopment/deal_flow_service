@@ -436,6 +436,7 @@ function renderBrokerPage() {
         selectedCampaignId: "",
         selectedCampaign: null,
         activeCompanyRecipientsPage: 1,
+        expandedRecipientCompanies: {},
       };
 
       const $ = (id) => document.getElementById(id);
@@ -636,6 +637,20 @@ function renderBrokerPage() {
         })[status] || status || "черновик";
       }
 
+      function recipientCompanyKey(company) {
+        return String(company?.companyName || "").trim().toLowerCase();
+      }
+
+      function isRecipientCompanyExpanded(company) {
+        return Boolean(state.expandedRecipientCompanies[recipientCompanyKey(company)]);
+      }
+
+      function toggleRecipientCompany(company) {
+        const key = recipientCompanyKey(company);
+        if (!key) return;
+        state.expandedRecipientCompanies[key] = !state.expandedRecipientCompanies[key];
+      }
+
       function companyDraft(key, company) {
         const all = readCompanyDrafts();
         const fallbackObject = company?.property?.title || "объект";
@@ -695,15 +710,23 @@ function renderBrokerPage() {
         $("companyPingTwoInput").value = draft.pingTwo || "";
         $("companyPingThreeInput").value = draft.pingThree || "";
         $("activeCompanyRecipientsList").innerHTML = targetCompanies.length
-          ? pageItems.map((company) =>
-            '<div class="activity-row">' +
+          ? pageItems.map((company) => {
+            const expanded = isRecipientCompanyExpanded(company);
+            return '<div class="activity-row">' +
               '<strong>' + escapeHtml(company.companyName || "") + '</strong>' +
-              '<div class="row"><span class="badge">первые письма: ' + escapeHtml(company.firstTouchCount || 0) + '</span><span class="badge">follow-up: ' + escapeHtml(company.followUpCount || 0) + '</span><span class="badge">email: ' + escapeHtml(company.uniqueEmailCount || 0) + '</span></div>' +
-              '<div class="recipient-list">' + (company.recipients || []).map((recipient) =>
-                '<div class="recipient-row"><strong>' + escapeHtml(recipient.email || "") + '</strong><div class="small">' + escapeHtml((recipient.contactName || "Контакт не указан") + " · " + (recipient.status || "")) + '</div></div>'
-              ).join("") + '</div>' +
-            '</div>'
-          ).join("")
+              '<div class="row">' +
+                '<span class="badge">первые письма: ' + escapeHtml(company.firstTouchCount || 0) + '</span>' +
+                '<span class="badge">follow-up: ' + escapeHtml(company.followUpCount || 0) + '</span>' +
+                '<span class="badge">email: ' + escapeHtml(company.uniqueEmailCount || 0) + '</span>' +
+                '<button class="btn" data-toggle-recipient-company="' + escapeHtml(recipientCompanyKey(company)) + '">' + (expanded ? '▾' : '▸') + '</button>' +
+              '</div>' +
+              (expanded
+                ? '<div class="recipient-list">' + (company.recipients || []).map((recipient) =>
+                  '<div class="recipient-row"><strong>' + escapeHtml(recipient.email || "") + '</strong><div class="small">' + escapeHtml((recipient.contactName || "Контакт не указан") + " · " + (recipient.status || "")) + '</div></div>'
+                ).join("") + '</div>'
+                : '') +
+            '</div>';
+          }).join("")
           : '<div class="small">По объекту пока нет компаний-получателей.</div>';
         $("activeCompanyPageBadge").textContent = page + " / " + totalPages;
         $("activeCompanyPrevPageBtn").disabled = page <= 1;
@@ -776,6 +799,7 @@ function renderBrokerPage() {
           state.selectedCampaignId = "";
           state.selectedCampaign = null;
           state.activeCompanyRecipientsPage = 1;
+          state.expandedRecipientCompanies = {};
           history.pushState({}, "", "/broker");
           renderAll();
         });
@@ -794,9 +818,17 @@ function renderBrokerPage() {
           if (activeCampaignCard) {
             state.selectedCampaignId = activeCampaignCard.getAttribute("data-active-campaign-id") || "";
             state.activeCompanyRecipientsPage = 1;
+            state.expandedRecipientCompanies = {};
             const campaign = state.campaigns.find((item) => item.id === state.selectedCampaignId);
             history.pushState({}, "", objectUrl(campaign?.property_id || campaign?.property?.id || ""));
             loadSelectedCampaign().then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
+            return;
+          }
+          const toggleRecipientCompanyButton = event.target.closest("[data-toggle-recipient-company]");
+          if (toggleRecipientCompanyButton) {
+            const key = toggleRecipientCompanyButton.getAttribute("data-toggle-recipient-company") || "";
+            state.expandedRecipientCompanies[key] = !state.expandedRecipientCompanies[key];
+            renderActiveCompanyDetail();
             return;
           }
         });
