@@ -85,6 +85,10 @@ supabase/schema.sql
 - `broker_deals` хранит сделки, стадии, `next_step` и дедлайны.
 - `broker_deal_properties` хранит только связь сделки с объектом из `properties` и deal-specific статус.
 - `broker_deal_activities` хранит timeline сделки.
+- `broker_campaigns` хранит объектные outbound-кампании.
+- `broker_campaign_briefs` хранит snapshot брифа и объекта на момент создания кампании.
+- `broker_campaign_hypotheses` хранит ICP-гипотезы и их согласование.
+- `broker_campaign_targets`, `broker_message_*`, `broker_send_*`, `broker_mailboxes`, `broker_quota_windows`, `broker_amo_exports` и `broker_approvals` задают будущий контур отправок, квот, аналитики и AMO outbox.
 - `properties` остается таблицей каталога во владении `deal_worker`; этот сервис ее не изменяет.
 
 ## Routes
@@ -108,6 +112,13 @@ supabase/schema.sql
 - `GET /broker/deals/:id/activities`
 - `POST /broker/deals/:id/activities`
 - `GET /broker/catalog/properties`
+- `GET /broker/campaigns`
+- `POST /broker/campaigns`
+- `GET /broker/campaigns/:id`
+- `PATCH /broker/campaigns/:id`
+- `GET /broker/campaigns/:id/hypotheses`
+- `POST /broker/campaigns/:id/hypotheses`
+- `PATCH /broker/campaign-hypotheses/:id`
 
 ## Проверка MVP
 
@@ -129,6 +140,9 @@ npm run build
 - привязка объекта из `properties`;
 - `GET /broker/deals/:id` с клиентом, linked objects и activities;
 - catalog bridge только по `published` объектам.
+- создание кампании по объекту;
+- snapshot брифа кампании;
+- создание и согласование ICP-гипотез.
 
 Ручной smoke test с реальной Supabase-базой:
 

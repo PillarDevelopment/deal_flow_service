@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { getAuthContext, requireSuperAdmin } from "../auth.js";
 import {
+  normalizeCampaignStatus,
   normalizeActivityType,
+  normalizeHypothesisStatus,
   normalizeBoolean,
   normalizeDealPropertyStatus,
   normalizeDealStage,
@@ -16,6 +18,7 @@ type ListQuery = {
   limit?: string;
   stage?: string;
   clientId?: string;
+  propertyId?: string;
 };
 
 type ClientBody = {
@@ -58,6 +61,29 @@ type ActivityBody = {
   activityType?: string;
   comment?: string;
   payload?: Record<string, unknown>;
+};
+
+type CampaignBody = {
+  propertyId?: string;
+  campaignName?: string;
+  status?: string;
+  objective?: string;
+  startDate?: string;
+  endDate?: string;
+  briefText?: string;
+  sourceVersion?: string;
+  attachmentsSnapshot?: unknown;
+  propertySnapshot?: Record<string, unknown>;
+};
+
+type CampaignHypothesisBody = {
+  segmentName?: string;
+  segmentType?: string;
+  valueProp?: string;
+  channel?: string;
+  priority?: number | string;
+  status?: string;
+  reasoning?: string;
 };
 
 export async function brokerApiRoutes(server: FastifyInstance) {
@@ -402,6 +428,159 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     if (error) return reply.status(500).send({ error: error.message });
     return { items: data ?? [] };
   });
+
+  server.get<{ Querystring: ListQuery }>("/campaigns", async (request, reply) => {
+    const limit = normalizeLimit(request.query.limit, 100);
+    const q = normalizeString(request.query.q, 120);
+    let query = server.db
+      .from("broker_campaigns")
+      .select("*")
+      .order("updated_at", { ascending: false })
+      .limit(limit);
+
+    if (request.query.propertyId) {
+      query = query.eq("property_id", normalizeString(request.query.propertyId, 80));
+    }
+    if (request.query.stage) {
+      query = query.eq("status", normalizeCampaignStatus(request.query.stage));
+    }
+    if (q) {
+      const like = `%${escapeLike(q)}%`;
+      query = query.or([
+        `campaign_name.ilike.${like}`,
+        `objective.ilike.${like}`,
+      ].join(","));
+    }
+
+    const { data, error } = await query;
+    if (error) return reply.status(500).send({ error: error.message });
+    return { items: data ?? [] };
+  });
+
+  server.post<{ Body: CampaignBody }>("/campaigns", async (request, reply) => {
+    const auth = getAuthContext(request);
+    const propertyId = normalizeString(request.body?.propertyId, 80);
+    const campaignName = normalizeString(request.body?.campaignName, 240);
+    if (!propertyId) {
+      return reply.status(400).send({ error: "Требуется propertyId" });
+    }
+    if (!campaignName) {
+      return reply.status(400).send({ error: "Требуется campaignName" });
+    }
+
+    const { data: property, error: propertyError } = await server.db
+      .from("properties")
+      .select("id,title,address,region,price_rub,area_sqm,price_per_sqm,attributes,curation_status")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (propertyError) return reply.status(500).send({ error: propertyError.message });
+    if (!property) return reply.status(404).send({ error: "Объект не найден" });
+
+    const campaignPayload = buildCampaignPayload(request.body, propertyId, auth?.userId ?? null);
+    const { data: campaign, error: campaignError } = await server.db
+      .from("broker_campaigns")
+      .insert(campaignPayload)
+      .select("*")
+      .single();
+    if (campaignError) return reply.status(500).send({ error: campaignError.message });
+
+    const briefPayload = {
+      campaign_id: campaign.id,
+      property_snapshot: request.body?.propertySnapshot ?? property,
+      original_brief: normalizeNullableString(request.body?.briefText, 4000),
+      attachments_snapshot: Array.isArray(request.body?.attachmentsSnapshot)
+        ? request.body.attachmentsSnapshot
+        : [],
+      source_version: normalizeNullableString(request.body?.sourceVersion, 120),
+    };
+    await server.db.from("broker_campaign_briefs").upsert(briefPayload, { onConflict: "campaign_id" });
+
+    const detail = await loadCampaignDetail(server, campaign.id);
+    return reply.status(201).send(detail);
+  });
+
+  server.get<{ Params: { id: string } }>("/campaigns/:id", async (request, reply) => {
+    const detail = await loadCampaignDetail(server, request.params.id);
+    if (!detail) {
+      return reply.status(404).send({ error: "Кампания не найдена" });
+    }
+    return detail;
+  });
+
+  server.patch<{ Params: { id: string }; Body: CampaignBody }>("/campaigns/:id", async (request, reply) => {
+    const payload = buildCampaignPatchPayload(request.body);
+    const { data, error } = await server.db
+      .from("broker_campaigns")
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq("id", request.params.id)
+      .select("*")
+      .maybeSingle();
+    if (error) return reply.status(500).send({ error: error.message });
+    if (!data) return reply.status(404).send({ error: "Кампания не найдена" });
+
+    const briefPayload = buildCampaignBriefPatchPayload(request.body);
+    if (Object.keys(briefPayload).length > 0) {
+      const { error: briefError } = await server.db
+        .from("broker_campaign_briefs")
+        .update(briefPayload)
+        .eq("campaign_id", request.params.id);
+      if (briefError) return reply.status(500).send({ error: briefError.message });
+    }
+
+    const detail = await loadCampaignDetail(server, request.params.id);
+    return detail ?? data;
+  });
+
+  server.get<{ Params: { id: string } }>("/campaigns/:id/hypotheses", async (request, reply) => {
+    const { data, error } = await server.db
+      .from("broker_campaign_hypotheses")
+      .select("*")
+      .eq("campaign_id", request.params.id)
+      .order("priority", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (error) return reply.status(500).send({ error: error.message });
+    return { items: data ?? [] };
+  });
+
+  server.post<{ Params: { id: string }; Body: CampaignHypothesisBody }>("/campaigns/:id/hypotheses", async (request, reply) => {
+    const auth = getAuthContext(request);
+    const payload = buildCampaignHypothesisPayload(request.body, request.params.id, auth?.userId ?? null);
+    if (!payload.segment_name) {
+      return reply.status(400).send({ error: "Требуется segmentName" });
+    }
+    if (!payload.segment_type) {
+      return reply.status(400).send({ error: "Требуется segmentType" });
+    }
+
+    const { data: campaign, error: campaignError } = await server.db
+      .from("broker_campaigns")
+      .select("id")
+      .eq("id", request.params.id)
+      .maybeSingle();
+    if (campaignError) return reply.status(500).send({ error: campaignError.message });
+    if (!campaign) return reply.status(404).send({ error: "Кампания не найдена" });
+
+    const { data, error } = await server.db
+      .from("broker_campaign_hypotheses")
+      .insert(payload)
+      .select("*")
+      .single();
+    if (error) return reply.status(500).send({ error: error.message });
+    return reply.status(201).send(data);
+  });
+
+  server.patch<{ Params: { id: string }; Body: CampaignHypothesisBody }>("/campaign-hypotheses/:id", async (request, reply) => {
+    const payload = buildCampaignHypothesisPatchPayload(request.body);
+    const { data, error } = await server.db
+      .from("broker_campaign_hypotheses")
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq("id", request.params.id)
+      .select("*")
+      .maybeSingle();
+    if (error) return reply.status(500).send({ error: error.message });
+    if (!data) return reply.status(404).send({ error: "Гипотеза не найдена" });
+    return data;
+  });
 }
 
 function buildClientPayload(body: ClientBody | undefined, brokerUserId: string | null | undefined) {
@@ -470,6 +649,70 @@ function buildDealPatchPayload(body: DealBody | undefined) {
   });
 }
 
+function buildCampaignPayload(body: CampaignBody | undefined, propertyId: string, brokerUserId: string | null) {
+  return removeUndefined({
+    property_id: propertyId,
+    campaign_name: normalizeString(body?.campaignName, 240) || "Campaign",
+    status: normalizeCampaignStatus(body?.status),
+    objective: normalizeNullableString(body?.objective, 4000),
+    owner_user_id: brokerUserId,
+    start_date: normalizeNullableString(body?.startDate, 40),
+    end_date: normalizeNullableString(body?.endDate, 40),
+  });
+}
+
+function buildCampaignPatchPayload(body: CampaignBody | undefined) {
+  return removeUndefined({
+    property_id: body?.propertyId !== undefined ? normalizeString(body.propertyId, 80) : undefined,
+    campaign_name: body?.campaignName !== undefined ? normalizeString(body.campaignName, 240) : undefined,
+    status: body?.status !== undefined ? normalizeCampaignStatus(body.status) : undefined,
+    objective: body?.objective !== undefined ? normalizeNullableString(body.objective, 4000) : undefined,
+    start_date: body?.startDate !== undefined ? normalizeNullableString(body.startDate, 40) : undefined,
+    end_date: body?.endDate !== undefined ? normalizeNullableString(body.endDate, 40) : undefined,
+  });
+}
+
+function buildCampaignBriefPatchPayload(body: CampaignBody | undefined) {
+  return removeUndefined({
+    property_snapshot: body?.propertySnapshot !== undefined ? body.propertySnapshot : undefined,
+    original_brief: body?.briefText !== undefined ? normalizeNullableString(body.briefText, 4000) : undefined,
+    attachments_snapshot: body?.attachmentsSnapshot !== undefined
+      ? (Array.isArray(body.attachmentsSnapshot) ? body.attachmentsSnapshot : [])
+      : undefined,
+    source_version: body?.sourceVersion !== undefined ? normalizeNullableString(body.sourceVersion, 120) : undefined,
+  });
+}
+
+function buildCampaignHypothesisPayload(
+  body: CampaignHypothesisBody | undefined,
+  campaignId: string,
+  createdBy: string | null,
+) {
+  return removeUndefined({
+    campaign_id: campaignId,
+    segment_name: normalizeString(body?.segmentName, 240),
+    segment_type: normalizeString(body?.segmentType, 120),
+    value_prop: normalizeNullableString(body?.valueProp, 4000),
+    channel: normalizeNullableString(body?.channel, 120),
+    priority: normalizeNumber(body?.priority) ?? 0,
+    status: normalizeHypothesisStatus(body?.status),
+    reasoning: normalizeNullableString(body?.reasoning, 4000),
+    created_by: createdBy,
+  });
+}
+
+function buildCampaignHypothesisPatchPayload(body: CampaignHypothesisBody | undefined) {
+  return removeUndefined({
+    segment_name: body?.segmentName !== undefined ? normalizeString(body.segmentName, 240) : undefined,
+    segment_type: body?.segmentType !== undefined ? normalizeString(body.segmentType, 120) : undefined,
+    value_prop: body?.valueProp !== undefined ? normalizeNullableString(body.valueProp, 4000) : undefined,
+    channel: body?.channel !== undefined ? normalizeNullableString(body.channel, 120) : undefined,
+    priority: body?.priority !== undefined ? normalizeNumber(body.priority) ?? 0 : undefined,
+    status: body?.status !== undefined ? normalizeHypothesisStatus(body.status) : undefined,
+    reasoning: body?.reasoning !== undefined ? normalizeNullableString(body.reasoning, 4000) : undefined,
+  });
+}
+
 function normalizeLimit(value: unknown, fallback: number) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -486,4 +729,52 @@ function hasOwn(value: object | null | undefined, key: string) {
 
 function removeUndefined<T extends Record<string, unknown>>(value: T) {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
+async function loadCampaignDetail(server: FastifyInstance, campaignId: string) {
+  const { data: campaign, error: campaignError } = await server.db
+    .from("broker_campaigns")
+    .select("*")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (campaignError) {
+    throw new Error(campaignError.message);
+  }
+  if (!campaign) return null;
+
+  const [{ data: property, error: propertyError }, { data: brief, error: briefError }, { data: hypotheses, error: hypothesesError }] = await Promise.all([
+    server.db
+      .from("properties")
+      .select("id,title,address,region,price_rub,area_sqm,price_per_sqm,attributes,curation_status")
+      .eq("id", campaign.property_id)
+      .maybeSingle(),
+    server.db
+      .from("broker_campaign_briefs")
+      .select("*")
+      .eq("campaign_id", campaignId)
+      .maybeSingle(),
+    server.db
+      .from("broker_campaign_hypotheses")
+      .select("*")
+      .eq("campaign_id", campaignId)
+      .order("priority", { ascending: false })
+      .order("created_at", { ascending: false }),
+  ]);
+
+  if (propertyError) {
+    throw new Error(propertyError.message);
+  }
+  if (briefError) {
+    throw new Error(briefError.message);
+  }
+  if (hypothesesError) {
+    throw new Error(hypothesesError.message);
+  }
+
+  return {
+    ...campaign,
+    property: property ?? null,
+    brief: brief ?? null,
+    hypotheses: hypotheses ?? [],
+  };
 }

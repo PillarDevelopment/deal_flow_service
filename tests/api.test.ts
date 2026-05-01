@@ -12,6 +12,19 @@ type TableName =
   | "broker_deals"
   | "broker_deal_properties"
   | "broker_deal_activities"
+  | "broker_campaigns"
+  | "broker_campaign_briefs"
+  | "broker_campaign_hypotheses"
+  | "broker_campaign_targets"
+  | "broker_message_threads"
+  | "broker_message_versions"
+  | "broker_sequence_steps"
+  | "broker_send_jobs"
+  | "broker_send_events"
+  | "broker_mailboxes"
+  | "broker_quota_windows"
+  | "broker_amo_exports"
+  | "broker_approvals"
   | "properties";
 
 type Store = Record<TableName, Row[]>;
@@ -150,6 +163,76 @@ test("broker catalog bridge returns published properties only", async () => {
   await app.close();
 });
 
+test("broker campaign API creates an object campaign and manages hypotheses", async () => {
+  const app = await buildTestApp();
+  const headers = authHeaders();
+
+  const created = await app.inject({
+    method: "POST",
+    url: "/broker/campaigns",
+    headers,
+    payload: {
+      propertyId: PROPERTY_ID,
+      campaignName: "Складской комплекс — outbound wave",
+      objective: "Проверить спрос у складских операторов",
+      briefText: "Объект 2400 м², складской формат.",
+      sourceVersion: "test-brief-v1",
+    },
+  });
+  assert.equal(created.statusCode, 201);
+  const campaign = created.json();
+  assert.equal(campaign.property_id, PROPERTY_ID);
+  assert.equal(campaign.status, "draft");
+  assert.equal(campaign.property.title, "Складской комплекс");
+  assert.equal(campaign.brief.original_brief, "Объект 2400 м², складской формат.");
+
+  const hypothesis = await app.inject({
+    method: "POST",
+    url: `/broker/campaigns/${campaign.id}/hypotheses`,
+    headers,
+    payload: {
+      segmentName: "Складские операторы",
+      segmentType: "tenant",
+      valueProp: "Готовый складской объем в Москве",
+      channel: "email",
+      priority: "10",
+      reasoning: "Профильный спрос на площадь и локацию",
+    },
+  });
+  assert.equal(hypothesis.statusCode, 201);
+  assert.equal(hypothesis.json().segment_name, "Складские операторы");
+  assert.equal(hypothesis.json().created_by, SUPER_ADMIN_ID);
+
+  const updatedHypothesis = await app.inject({
+    method: "PATCH",
+    url: `/broker/campaign-hypotheses/${hypothesis.json().id}`,
+    headers,
+    payload: { status: "approved", priority: 12 },
+  });
+  assert.equal(updatedHypothesis.statusCode, 200);
+  assert.equal(updatedHypothesis.json().status, "approved");
+  assert.equal(updatedHypothesis.json().priority, 12);
+
+  const detail = await app.inject({
+    method: "GET",
+    url: `/broker/campaigns/${campaign.id}`,
+    headers,
+  });
+  assert.equal(detail.statusCode, 200);
+  assert.equal(detail.json().hypotheses.length, 1);
+  assert.equal(detail.json().hypotheses[0].status, "approved");
+
+  const campaigns = await app.inject({
+    method: "GET",
+    url: `/broker/campaigns?propertyId=${PROPERTY_ID}`,
+    headers,
+  });
+  assert.equal(campaigns.statusCode, 200);
+  assert.equal(campaigns.json().items.length, 1);
+
+  await app.close();
+});
+
 async function buildTestApp() {
   const app = Fastify({ logger: false });
   const store = createStore();
@@ -175,6 +258,19 @@ function createStore(): Store {
     broker_deals: [],
     broker_deal_properties: [],
     broker_deal_activities: [],
+    broker_campaigns: [],
+    broker_campaign_briefs: [],
+    broker_campaign_hypotheses: [],
+    broker_campaign_targets: [],
+    broker_message_threads: [],
+    broker_message_versions: [],
+    broker_sequence_steps: [],
+    broker_send_jobs: [],
+    broker_send_events: [],
+    broker_mailboxes: [],
+    broker_quota_windows: [],
+    broker_amo_exports: [],
+    broker_approvals: [],
     properties: [
       {
         id: PROPERTY_ID,

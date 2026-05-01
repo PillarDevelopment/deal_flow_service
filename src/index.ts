@@ -1,9 +1,12 @@
 import { buildServer } from "./server.js";
+import { existsSync } from "node:fs";
 
 const envLoader = (
   process as typeof process & { loadEnvFile?: (path?: string) => void }
 ).loadEnvFile;
-envLoader?.();
+if (existsSync(".env")) {
+  envLoader?.();
+}
 
 const server = await buildServer();
 const port = Number(process.env.PORT ?? 3010);

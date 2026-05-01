@@ -1,8 +1,12 @@
 import {
+  CAMPAIGN_STATUSES,
   ACTIVITY_TYPES,
+  HYPOTHESIS_STATUSES,
   DEAL_PROPERTY_STATUSES,
   DEAL_STAGES,
+  type CampaignStatus,
   type ActivityType,
+  type HypothesisStatus,
   type DealPropertyStatus,
   type DealStage,
 } from "./types.js";
@@ -47,4 +51,14 @@ export function normalizeDealPropertyStatus(
 
 export function normalizeActivityType(value: unknown, fallback: ActivityType = "note") {
   return ACTIVITY_TYPES.includes(value as ActivityType) ? value as ActivityType : fallback;
+}
+
+export function normalizeCampaignStatus(value: unknown, fallback: CampaignStatus = "draft") {
+  return CAMPAIGN_STATUSES.includes(value as CampaignStatus) ? value as CampaignStatus : fallback;
+}
+
+export function normalizeHypothesisStatus(value: unknown, fallback: HypothesisStatus = "draft") {
+  return HYPOTHESIS_STATUSES.includes(value as HypothesisStatus)
+    ? value as HypothesisStatus
+    : fallback;
 }

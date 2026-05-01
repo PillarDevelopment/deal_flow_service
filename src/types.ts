@@ -34,6 +34,18 @@ export type ActivityType =
   | "status_changed"
   | "note";
 
+export type CampaignStatus =
+  | "draft"
+  | "needs_review"
+  | "approved"
+  | "scheduled"
+  | "running"
+  | "paused"
+  | "completed"
+  | "archived";
+
+export type HypothesisStatus = "draft" | "approved" | "rejected" | "deprecated";
+
 export const DEAL_STAGES: DealStage[] = [
   "new_lead",
   "contacted",
@@ -63,4 +75,22 @@ export const ACTIVITY_TYPES: ActivityType[] = [
   "feedback",
   "status_changed",
   "note",
+];
+
+export const CAMPAIGN_STATUSES: CampaignStatus[] = [
+  "draft",
+  "needs_review",
+  "approved",
+  "scheduled",
+  "running",
+  "paused",
+  "completed",
+  "archived",
+];
+
+export const HYPOTHESIS_STATUSES: HypothesisStatus[] = [
+  "draft",
+  "approved",
+  "rejected",
+  "deprecated",
 ];

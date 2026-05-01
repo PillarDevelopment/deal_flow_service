@@ -165,6 +165,13 @@ function renderBrokerPage() {
         gap: 18px;
         align-items: start;
       }
+      .campaign-grid {
+        display: grid;
+        grid-template-columns: 360px minmax(0, 1fr) 360px;
+        gap: 18px;
+        align-items: start;
+        margin-bottom: 18px;
+      }
       .stack {
         display: grid;
         gap: 12px;
@@ -205,6 +212,7 @@ function renderBrokerPage() {
       .deal-card,
       .client-card,
       .property-card,
+      .campaign-card,
       .activity-row {
         border: 1px solid rgba(223,214,199,0.92);
         border-radius: 18px;
@@ -216,7 +224,9 @@ function renderBrokerPage() {
         margin-bottom: 10px;
       }
       .deal-card.active,
-      .client-card.active {
+      .client-card.active,
+      .campaign-card.active,
+      .property-card.active {
         border-color: var(--accent);
         box-shadow: 0 0 0 3px rgba(23,107,77,0.12);
       }
@@ -252,6 +262,7 @@ function renderBrokerPage() {
       @media (max-width: 980px) {
         .hero,
         .grid,
+        .campaign-grid,
         .detail {
           grid-template-columns: 1fr;
         }
@@ -281,14 +292,57 @@ function renderBrokerPage() {
           <div class="stats">
             <div class="stat"><span>Клиенты</span><strong id="clientsCount">0</strong></div>
             <div class="stat"><span>Сделки</span><strong id="dealsCount">0</strong></div>
-            <div class="stat"><span>В работе</span><strong id="activeDealsCount">0</strong></div>
+            <div class="stat"><span>Кампании</span><strong id="campaignsCount">0</strong></div>
           </div>
         </div>
         <div class="panel">
           <h2>Доступ</h2>
           <p class="small">Используется тот же platform_token, что и в deal_worker. Если токена нет, войдите в основную платформу и откройте /broker снова.</p>
+          <div class="row">
+            <input id="platformTokenInput" placeholder="platform_token" />
+            <button class="btn" id="savePlatformTokenBtn">Token</button>
+          </div>
+          <button class="btn danger" id="clearPlatformTokenBtn">Сбросить token</button>
           <div class="message" id="globalMsg"></div>
         </div>
+      </section>
+
+      <section class="campaign-grid">
+        <aside class="panel stack">
+          <h2>Object Workbench</h2>
+          <input id="campaignPropertySearchInput" placeholder="Найти объект для кампании" />
+          <button class="btn" id="searchCampaignPropertiesBtn">Искать объект</button>
+          <div id="campaignPropertyResults" class="stack"></div>
+          <input id="campaignNameInput" placeholder="Название кампании" />
+          <textarea id="campaignObjectiveInput" placeholder="Цель кампании"></textarea>
+          <textarea id="campaignBriefInput" placeholder="Краткий бриф / sales angle"></textarea>
+          <button class="btn primary" id="createCampaignBtn">Создать кампанию</button>
+        </aside>
+
+        <section class="panel stack">
+          <div class="row">
+            <div>
+              <h2>Campaigns</h2>
+              <div class="small">Кампании привязаны к объектам из deal_worker и живут в deal_flow_service.</div>
+            </div>
+            <button class="btn" id="refreshCampaignsBtn">Обновить</button>
+          </div>
+          <div id="campaignsList" class="stack"></div>
+        </section>
+
+        <aside class="panel stack" id="campaignDetailPanel">
+          <h2 id="campaignDetailTitle">Hypothesis Studio</h2>
+          <div id="campaignDetailBody" class="small">Выберите кампанию.</div>
+          <input id="hypothesisSegmentNameInput" placeholder="Сегмент" />
+          <input id="hypothesisSegmentTypeInput" placeholder="Тип сегмента" />
+          <textarea id="hypothesisValuePropInput" placeholder="Value prop"></textarea>
+          <textarea id="hypothesisReasoningInput" placeholder="Почему эта гипотеза релевантна"></textarea>
+          <div class="row">
+            <input id="hypothesisChannelInput" placeholder="Канал" />
+            <input id="hypothesisPriorityInput" placeholder="Приоритет" />
+          </div>
+          <button class="btn primary" id="addHypothesisBtn">Добавить гипотезу</button>
+        </aside>
       </section>
 
       <section class="grid">
@@ -359,13 +413,25 @@ function renderBrokerPage() {
         me: null,
         clients: [],
         deals: [],
+        campaigns: [],
         selectedClientId: "",
         selectedDealId: "",
+        selectedCampaignId: "",
         selectedDeal: null,
+        selectedCampaign: null,
         propertyResults: [],
+        campaignPropertyResults: [],
+        selectedCampaignPropertyId: "",
       };
 
       const $ = (id) => document.getElementById(id);
+
+      const tokenFromUrl = new URLSearchParams(window.location.search).get("platform_token");
+      if (tokenFromUrl) {
+        localStorage.setItem("platform_token", tokenFromUrl);
+        state.token = tokenFromUrl;
+        history.replaceState({}, "", window.location.pathname);
+      }
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => (
@@ -407,6 +473,11 @@ function renderBrokerPage() {
         state.deals = payload.items || [];
       }
 
+      async function loadCampaigns() {
+        const payload = await apiFetch("/broker/campaigns?limit=100");
+        state.campaigns = payload.items || [];
+      }
+
       async function loadSelectedDeal() {
         if (!state.selectedDealId) {
           state.selectedDeal = null;
@@ -415,12 +486,21 @@ function renderBrokerPage() {
         state.selectedDeal = await apiFetch("/broker/deals/" + encodeURIComponent(state.selectedDealId));
       }
 
+      async function loadSelectedCampaign() {
+        if (!state.selectedCampaignId) {
+          state.selectedCampaign = null;
+          return;
+        }
+        state.selectedCampaign = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaignId));
+      }
+
       async function refreshAll() {
         $("globalMsg").textContent = "Загружаем Deal Flow...";
         try {
           await loadMe();
-          await Promise.all([loadClients(), loadDeals()]);
+          await Promise.all([loadClients(), loadDeals(), loadCampaigns()]);
           if (state.selectedDealId) await loadSelectedDeal();
+          if (state.selectedCampaignId) await loadSelectedCampaign();
           renderAll();
           $("globalMsg").textContent = "Готово.";
         } catch (err) {
@@ -444,7 +524,6 @@ function renderBrokerPage() {
 
       function renderBoard() {
         $("dealsCount").textContent = String(state.deals.length);
-        $("activeDealsCount").textContent = String(state.deals.filter((deal) => !["won", "lost"].includes(deal.stage)).length);
         $("board").innerHTML = STAGES.map(([stage, label]) => {
           const deals = state.deals.filter((deal) => deal.stage === stage);
           return '<section class="column">' +
@@ -459,6 +538,58 @@ function renderBrokerPage() {
             ).join("") +
           '</section>';
         }).join("");
+      }
+
+      function renderCampaigns() {
+        $("campaignsCount").textContent = String(state.campaigns.length);
+        $("campaignsList").innerHTML = state.campaigns.length
+          ? state.campaigns.map((campaign) =>
+            '<article class="campaign-card' + (campaign.id === state.selectedCampaignId ? ' active' : '') + '" data-campaign-id="' + escapeHtml(campaign.id) + '">' +
+              '<strong>' + escapeHtml(campaign.campaign_name || "Без названия") + '</strong>' +
+              '<div class="small">' + escapeHtml(campaign.objective || "Цель не указана") + '</div>' +
+              '<div class="row"><span class="badge">' + escapeHtml(campaign.status || "draft") + '</span><span class="badge">' + escapeHtml(campaign.start_date || "без даты") + '</span></div>' +
+            '</article>'
+          ).join("")
+          : '<div class="small">Кампаний пока нет.</div>';
+      }
+
+      function renderCampaignPropertyResults() {
+        $("campaignPropertyResults").innerHTML = state.campaignPropertyResults.length
+          ? state.campaignPropertyResults.map((property) =>
+            '<div class="property-card' + (property.id === state.selectedCampaignPropertyId ? ' active' : '') + '" data-campaign-property-id="' + escapeHtml(property.id) + '">' +
+              '<strong>' + escapeHtml(property.title || "Без названия") + '</strong>' +
+              '<div class="small">' + escapeHtml(property.region || property.address || "Локация не указана") + '</div>' +
+              '<div class="small">' + escapeHtml(formatMoney(property.price_rub)) + '</div>' +
+            '</div>'
+          ).join("")
+          : '<div class="small">Найдите объект, чтобы создать кампанию.</div>';
+      }
+
+      function renderCampaignDetail() {
+        const detail = state.selectedCampaign;
+        $("campaignDetailTitle").textContent = detail?.campaign_name || "Hypothesis Studio";
+        if (!detail) {
+          $("campaignDetailBody").innerHTML = "Выберите кампанию.";
+          return;
+        }
+
+        const property = detail.property || {};
+        const hypotheses = Array.isArray(detail.hypotheses) ? detail.hypotheses : [];
+        $("campaignDetailBody").innerHTML =
+          '<div class="stack">' +
+            '<div><strong>' + escapeHtml(property.title || "Объект не найден") + '</strong><div class="small">' + escapeHtml(property.address || property.region || "") + '</div></div>' +
+            '<div class="row"><span class="badge">' + escapeHtml(detail.status || "draft") + '</span><span class="badge">' + escapeHtml(String(hypotheses.length)) + ' гипотез</span></div>' +
+            (hypotheses.length
+              ? hypotheses.map((item) =>
+                '<div class="activity-row">' +
+                  '<strong>' + escapeHtml(item.segment_name || "Сегмент") + '</strong>' +
+                  '<div class="small">' + escapeHtml(item.segment_type || "") + ' · ' + escapeHtml(item.channel || "канал не указан") + '</div>' +
+                  '<div>' + escapeHtml(item.value_prop || "") + '</div>' +
+                  '<div class="row"><span class="badge">' + escapeHtml(item.status || "draft") + '</span><button class="btn" data-approve-hypothesis-id="' + escapeHtml(item.id) + '">Approve</button></div>' +
+                '</div>'
+              ).join("")
+              : '<div class="small">Гипотез пока нет.</div>') +
+          '</div>';
       }
 
       function renderDealDetail() {
@@ -513,7 +644,11 @@ function renderBrokerPage() {
       }
 
       function renderAll() {
+        $("platformTokenInput").value = state.token ? "token сохранен" : "";
         renderClients();
+        renderCampaigns();
+        renderCampaignPropertyResults();
+        renderCampaignDetail();
         renderBoard();
         renderDealDetail();
         renderPropertyResults();
@@ -599,6 +734,78 @@ function renderBrokerPage() {
         renderPropertyResults();
       }
 
+      async function searchCampaignProperties() {
+        const q = $("campaignPropertySearchInput").value.trim();
+        const payload = await apiFetch("/broker/catalog/properties?" + new URLSearchParams({ q, limit: "10" }).toString());
+        state.campaignPropertyResults = payload.items || [];
+        renderCampaignPropertyResults();
+      }
+
+      async function createCampaign() {
+        if (!state.selectedCampaignPropertyId) {
+          $("globalMsg").textContent = "Сначала выберите объект для кампании.";
+          return;
+        }
+        const name = $("campaignNameInput").value.trim();
+        if (!name) {
+          $("globalMsg").textContent = "Введите название кампании.";
+          return;
+        }
+        const campaign = await apiFetch("/broker/campaigns", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            propertyId: state.selectedCampaignPropertyId,
+            campaignName: name,
+            objective: $("campaignObjectiveInput").value.trim(),
+            briefText: $("campaignBriefInput").value.trim(),
+          }),
+        });
+        state.selectedCampaignId = campaign.id;
+        state.selectedCampaign = campaign;
+        ["campaignNameInput", "campaignObjectiveInput", "campaignBriefInput"].forEach((id) => { $(id).value = ""; });
+        await refreshAll();
+      }
+
+      async function addHypothesis() {
+        if (!state.selectedCampaignId) {
+          $("globalMsg").textContent = "Сначала выберите кампанию.";
+          return;
+        }
+        const segmentName = $("hypothesisSegmentNameInput").value.trim();
+        const segmentType = $("hypothesisSegmentTypeInput").value.trim();
+        if (!segmentName || !segmentType) {
+          $("globalMsg").textContent = "Введите сегмент и тип сегмента.";
+          return;
+        }
+        await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaignId) + "/hypotheses", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            segmentName,
+            segmentType,
+            valueProp: $("hypothesisValuePropInput").value.trim(),
+            reasoning: $("hypothesisReasoningInput").value.trim(),
+            channel: $("hypothesisChannelInput").value.trim() || "email",
+            priority: $("hypothesisPriorityInput").value.trim(),
+          }),
+        });
+        ["hypothesisSegmentNameInput", "hypothesisSegmentTypeInput", "hypothesisValuePropInput", "hypothesisReasoningInput", "hypothesisChannelInput", "hypothesisPriorityInput"].forEach((id) => { $(id).value = ""; });
+        await loadSelectedCampaign();
+        await loadCampaigns();
+        renderAll();
+      }
+
+      async function approveHypothesis(hypothesisId) {
+        await apiFetch("/broker/campaign-hypotheses/" + encodeURIComponent(hypothesisId), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "approved" }),
+        });
+        await loadSelectedCampaign();
+        renderAll();
+      }
+
       async function addProperty(propertyId) {
         if (!state.selectedDealId) {
           $("globalMsg").textContent = "Сначала выберите сделку.";
@@ -614,14 +821,49 @@ function renderBrokerPage() {
 
       function bindEvents() {
         $("refreshBtn").addEventListener("click", refreshAll);
+        $("savePlatformTokenBtn").addEventListener("click", () => {
+          const token = $("platformTokenInput").value.trim();
+          if (!token || token === "token сохранен") return;
+          localStorage.setItem("platform_token", token);
+          state.token = token;
+          refreshAll();
+        });
+        $("clearPlatformTokenBtn").addEventListener("click", () => {
+          localStorage.removeItem("platform_token");
+          state.token = "";
+          state.me = null;
+          renderAll();
+          $("globalMsg").textContent = "Token сброшен.";
+        });
         $("newClientFocusBtn").addEventListener("click", () => $("clientNameInput").focus());
         $("createClientBtn").addEventListener("click", () => createClient().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
         $("createDealBtn").addEventListener("click", () => createDeal().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
         $("saveDealBtn").addEventListener("click", () => saveDeal().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
         $("addActivityBtn").addEventListener("click", () => addActivity().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
         $("searchPropertiesBtn").addEventListener("click", () => searchProperties().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
+        $("searchCampaignPropertiesBtn").addEventListener("click", () => searchCampaignProperties().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
+        $("createCampaignBtn").addEventListener("click", () => createCampaign().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
+        $("refreshCampaignsBtn").addEventListener("click", () => Promise.all([loadCampaigns(), state.selectedCampaignId ? loadSelectedCampaign() : Promise.resolve()]).then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
+        $("addHypothesisBtn").addEventListener("click", () => addHypothesis().catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message));
         $("clientSearchInput").addEventListener("input", () => loadClients().then(renderClients).catch(() => null));
         document.body.addEventListener("click", (event) => {
+          const campaignPropertyCard = event.target.closest("[data-campaign-property-id]");
+          if (campaignPropertyCard) {
+            state.selectedCampaignPropertyId = campaignPropertyCard.getAttribute("data-campaign-property-id") || "";
+            renderCampaignPropertyResults();
+            return;
+          }
+          const campaignCard = event.target.closest("[data-campaign-id]");
+          if (campaignCard) {
+            state.selectedCampaignId = campaignCard.getAttribute("data-campaign-id") || "";
+            loadSelectedCampaign().then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
+            return;
+          }
+          const approveHypothesisButton = event.target.closest("[data-approve-hypothesis-id]");
+          if (approveHypothesisButton) {
+            approveHypothesis(approveHypothesisButton.getAttribute("data-approve-hypothesis-id")).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
+            return;
+          }
           const clientCard = event.target.closest("[data-client-id]");
           if (clientCard) {
             state.selectedClientId = clientCard.getAttribute("data-client-id") || "";
