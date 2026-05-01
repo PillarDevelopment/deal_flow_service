@@ -286,6 +286,18 @@ function renderBrokerPage() {
         border-color: var(--accent);
         box-shadow: 0 0 0 3px rgba(23,107,77,0.12);
       }
+      .campaign-card.plan-ok {
+        border-color: rgba(23,107,77,0.22);
+        background: rgba(23,107,77,0.08);
+      }
+      .campaign-card.plan-behind {
+        border-color: rgba(206,120,149,0.26);
+        background: rgba(206,120,149,0.12);
+      }
+      .campaign-card.plan-empty {
+        border-color: rgba(219,168,74,0.32);
+        background: rgba(219,168,74,0.12);
+      }
       .badge {
         display: inline-flex;
         align-items: center;
@@ -707,6 +719,7 @@ function renderBrokerPage() {
         token: localStorage.getItem("platform_token") || "",
         me: null,
         campaigns: [],
+        campaignPlaybooks: {},
         campaignsTotal: 0,
         companyDirectoryTotal: 0,
         contactedCompaniesTotal: 0,
@@ -761,6 +774,14 @@ function renderBrokerPage() {
         const payload = await apiFetch("/broker/campaigns?" + new URLSearchParams({ q, limit: "100" }).toString());
         state.campaigns = payload.items || [];
         state.campaignsTotal = Number(payload.total ?? state.campaigns.length);
+        const playbooks = await Promise.all(state.campaigns.map(async (campaign) => {
+          try {
+            return [campaign.id, await apiFetch("/broker/campaigns/" + encodeURIComponent(campaign.id) + "/playbook")];
+          } catch {
+            return [campaign.id, null];
+          }
+        }));
+        state.campaignPlaybooks = Object.fromEntries(playbooks);
         if (state.selectedCampaignId && !state.campaigns.some((item) => item.id === state.selectedCampaignId)) {
           state.selectedCampaignId = "";
           state.selectedCampaign = null;
@@ -840,6 +861,7 @@ function renderBrokerPage() {
             $("authBadge").textContent = "Требуется вход";
             state.me = null;
             state.campaigns = [];
+            state.campaignPlaybooks = {};
             state.campaignsTotal = 0;
             state.companyDirectoryTotal = 0;
             state.contactedCompaniesTotal = 0;
@@ -887,8 +909,9 @@ function renderBrokerPage() {
           ? state.campaigns.map((campaign) => {
             const isActive = campaign.id === state.selectedCampaignId;
             const stats = campaign.stats || {};
+            const planState = summarizeCampaignPlan(state.campaignPlaybooks[campaign.id]);
             return (
-              '<article class="campaign-card' + (isActive ? ' active' : '') + '" data-active-campaign-id="' + escapeHtml(campaign.id || "") + '">' +
+              '<article class="campaign-card ' + planState.cardClass + (isActive ? ' active' : '') + '" data-active-campaign-id="' + escapeHtml(campaign.id || "") + '">' +
                 '<strong>' + escapeHtml(campaign.campaign_name || "Без названия") + '</strong>' +
                 '<div class="row" style="margin-top:8px;">' +
                   '<span class="badge">первые: ' + escapeHtml(stats.firstTouchCount || 0) + '</span>' +
@@ -1015,6 +1038,25 @@ function renderBrokerPage() {
         if (status === "behind") return { label: "Отстает", className: "badge status-behind" };
         if (status === "on_track") return { label: "Идет по плану", className: "badge status-on-track" };
         return { label: "Нет плана", className: "badge" };
+      }
+
+      function summarizeCampaignPlan(playbook) {
+        const paces = [
+          playbook?.monthly_progress?.pace_status || "not_planned",
+          playbook?.weekly_progress?.pace_status || "not_planned",
+          playbook?.daily_progress?.pace_status || "not_planned",
+        ];
+        if (paces.includes("behind")) {
+          return { label: "Отстает", badgeClass: "badge status-behind", cardClass: "plan-behind" };
+        }
+        if (paces.includes("ahead") || paces.includes("on_track")) {
+          return {
+            label: paces.includes("ahead") ? "Опережает" : "По плану",
+            badgeClass: "badge status-ahead",
+            cardClass: "plan-ok",
+          };
+        }
+        return { label: "План не задан", badgeClass: "badge status-inactive", cardClass: "plan-empty" };
       }
 
       function setPlanFact(prefix, progress) {
@@ -1200,8 +1242,9 @@ function renderBrokerPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(draft),
         });
+        state.campaignPlaybooks[campaign.id] = state.selectedCampaignPlaybook;
         $("globalMsg").textContent = "Карточка объекта сохранена.";
-        renderActiveCompanyDetail();
+        renderAll();
       }
 
       function bindEvents() {
@@ -1218,6 +1261,7 @@ function renderBrokerPage() {
           state.token = "";
           state.me = null;
           state.campaigns = [];
+          state.campaignPlaybooks = {};
           state.campaignsTotal = 0;
           state.companyDirectoryTotal = 0;
           state.contactedCompaniesTotal = 0;
