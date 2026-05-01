@@ -17,6 +17,7 @@ type TableName =
   | "broker_campaign_hypotheses"
   | "broker_campaign_targets"
   | "broker_company_directory"
+  | "broker_company_playbooks"
   | "broker_message_threads"
   | "broker_message_versions"
   | "broker_sequence_steps"
@@ -273,6 +274,56 @@ test("broker campaign API creates an object campaign and manages hypotheses", as
   await app.close();
 });
 
+test("broker object playbook reads and saves real object content", async () => {
+  const app = await buildTestApp();
+  const headers = authHeaders();
+
+  const campaigns = await app.inject({
+    method: "GET",
+    url: "/broker/campaigns",
+    headers,
+  });
+  assert.equal(campaigns.statusCode, 200);
+  const objectId = campaigns.json().items[0].id;
+  assert.match(objectId, /^object:/);
+
+  const initial = await app.inject({
+    method: "GET",
+    url: `/broker/campaigns/${encodeURIComponent(objectId)}/playbook`,
+    headers,
+  });
+  assert.equal(initial.statusCode, 200);
+  assert.equal(initial.json().company_key, objectId);
+
+  const saved = await app.inject({
+    method: "PUT",
+    url: `/broker/campaigns/${encodeURIComponent(objectId)}/playbook`,
+    headers,
+    payload: {
+      status: "running",
+      subject: "Тестовая тема",
+      letterBody: "Тестовое письмо",
+      pingOne: "Пинг 1",
+    },
+  });
+  assert.equal(saved.statusCode, 200);
+  assert.equal(saved.json().company_key, objectId);
+  assert.equal(saved.json().subject, "Тестовая тема");
+  assert.equal(saved.json().letter_body, "Тестовое письмо");
+  assert.equal(saved.json().ping_one, "Пинг 1");
+  assert.equal(saved.json().status, "running");
+
+  const fetched = await app.inject({
+    method: "GET",
+    url: `/broker/campaigns/${encodeURIComponent(objectId)}/playbook`,
+    headers,
+  });
+  assert.equal(fetched.statusCode, 200);
+  assert.equal(fetched.json().subject, "Тестовая тема");
+
+  await app.close();
+});
+
 async function buildTestApp() {
   const app = Fastify({ logger: false });
   const store = createStore();
@@ -351,6 +402,7 @@ function createStore(): Store {
         updated_at: "2026-05-01T09:00:00.000Z",
       },
     ],
+    broker_company_playbooks: [],
     broker_message_threads: [],
     broker_message_versions: [],
     broker_sequence_steps: [],

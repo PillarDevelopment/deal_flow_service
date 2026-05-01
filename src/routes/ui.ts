@@ -138,9 +138,23 @@ function renderBrokerPage() {
         background: var(--accent);
         color: #fff;
       }
+      .btn.warning {
+        border-color: rgba(219,168,74,0.45);
+        background: rgba(219,168,74,0.14);
+        color: #8d650f;
+      }
+      .btn.success {
+        border-color: rgba(23,107,77,0.3);
+        background: rgba(23,107,77,0.12);
+        color: var(--accent);
+      }
       .btn.danger {
         border-color: rgba(167,80,59,0.3);
         color: var(--danger);
+      }
+      .btn:disabled {
+        cursor: default;
+        opacity: 0.48;
       }
       .container {
         padding: 24px 0 40px;
@@ -281,6 +295,21 @@ function renderBrokerPage() {
         font-size: 12px;
         color: var(--muted);
         background: #fff;
+      }
+      .badge.status-active {
+        border-color: rgba(23,107,77,0.3);
+        background: rgba(23,107,77,0.12);
+        color: var(--accent);
+      }
+      .badge.status-inactive {
+        border-color: rgba(219,168,74,0.45);
+        background: rgba(219,168,74,0.14);
+        color: #8d650f;
+      }
+      .badge.status-stopped {
+        border-color: rgba(167,80,59,0.3);
+        background: rgba(167,80,59,0.12);
+        color: var(--danger);
       }
       .detail {
         display: grid;
@@ -429,8 +458,7 @@ function renderBrokerPage() {
             </div>
             <div class="row">
               <button class="btn primary" id="saveCompanyDraftBtn">Сохранить</button>
-              <button class="btn" id="startCompanyBtn">Запуск</button>
-              <button class="btn" id="pauseCompanyBtn">Пауза</button>
+              <button class="btn" id="toggleCompanyStatusBtn">Активно</button>
               <button class="btn danger" id="stopCompanyBtn">Стоп</button>
             </div>
           </div>
@@ -485,6 +513,7 @@ function renderBrokerPage() {
         selectedCampaign: null,
         activeCompanyRecipientsPage: 1,
         expandedRecipientCompanies: {},
+        selectedCampaignPlaybook: null,
       };
 
       const $ = (id) => document.getElementById(id);
@@ -598,7 +627,10 @@ function renderBrokerPage() {
           await loadMe();
           await Promise.all([loadCampaigns(), loadDashboardSummary()]);
           await syncSelectionFromPath();
-          if (state.selectedCampaignId) await loadSelectedCampaign();
+          if (state.selectedCampaignId) {
+            await loadSelectedCampaign();
+            await loadSelectedCampaignPlaybook();
+          }
           renderAll();
           $("globalMsg").textContent = "Готово.";
         } catch (err) {
@@ -611,6 +643,7 @@ function renderBrokerPage() {
             state.contactedCompaniesTotal = 0;
             state.sentEmailsTotal = 0;
             state.selectedCampaign = null;
+            state.selectedCampaignPlaybook = null;
           }
           $("globalMsg").textContent = "Ошибка: " + err.message;
           renderAll();
@@ -668,25 +701,47 @@ function renderBrokerPage() {
           : '<div class="small">Нет объектов по текущему фильтру.</div>';
       }
 
-      function readCompanyDrafts() {
-        try {
-          return JSON.parse(localStorage.getItem("broker_company_playbooks_v1") || "{}");
-        } catch {
-          return {};
-        }
-      }
-
-      function writeCompanyDrafts(value) {
-        localStorage.setItem("broker_company_playbooks_v1", JSON.stringify(value));
-      }
-
       function objectStatusLabel(status) {
         return ({
-          draft: "черновик",
-          running: "в работе",
-          paused: "на паузе",
-          stopped: "остановлен",
-        })[status] || status || "черновик";
+          draft: "Неактивно",
+          running: "Активно",
+          paused: "Неактивно",
+          stopped: "Остановлено",
+        })[status] || "Неактивно";
+      }
+
+      function isObjectActive(status) {
+        return status === "running";
+      }
+
+      function objectStatusClass(status) {
+        if (status === "running") return "badge status-active";
+        if (status === "stopped") return "badge status-stopped";
+        return "badge status-inactive";
+      }
+
+      function renderCompanyStatusControls(status) {
+        const toggleButton = $("toggleCompanyStatusBtn");
+        const stopButton = $("stopCompanyBtn");
+        const active = isObjectActive(status);
+
+        toggleButton.className = active ? "btn success" : "btn warning";
+        toggleButton.textContent = active ? "Активно" : "Неактивно";
+        stopButton.disabled = !active;
+      }
+
+      function applyToggleButtonHover(isHovering) {
+        const campaign = state.selectedCampaign;
+        const status = companyDraft(campaign).status || "draft";
+        const active = isObjectActive(status);
+        const toggleButton = $("toggleCompanyStatusBtn");
+        if (active) {
+          toggleButton.className = isHovering ? "btn danger" : "btn success";
+          toggleButton.textContent = isHovering ? "Остановить" : "Активно";
+          return;
+        }
+        toggleButton.className = isHovering ? "btn success" : "btn warning";
+        toggleButton.textContent = isHovering ? "Запуск" : "Неактивно";
       }
 
       function recipientCompanyKey(company) {
@@ -703,17 +758,25 @@ function renderBrokerPage() {
         state.expandedRecipientCompanies[key] = !state.expandedRecipientCompanies[key];
       }
 
-      function companyDraft(key, company) {
-        const all = readCompanyDrafts();
+      function companyDraft(company) {
+        const current = state.selectedCampaignPlaybook;
         const fallbackObject = company?.property?.title || "объект";
-        return all[key] || {
-          status: "draft",
-          subject: "Предложение по объекту " + fallbackObject,
-          letterBody: "Добрый день. Направляю предложение по объекту " + fallbackObject + ". Готов отправить материалы и обсудить формат.",
-          pingOne: "Возвращаюсь к письму по объекту. Подскажите, актуально ли посмотреть материалы?",
-          pingTwo: "Коротко напоминаю о предложении. Если интересно, отправлю расширенный пакет сегодня.",
-          pingThree: "Последний follow-up по этому объекту. Если тема неактуальна, зафиксирую и сниму компанию с пинга.",
+        return {
+          status: current?.status || "draft",
+          subject: current?.subject || ("Предложение по объекту " + fallbackObject),
+          letterBody: current?.letter_body || ("Добрый день. Направляю предложение по объекту " + fallbackObject + ". Готов отправить материалы и обсудить формат."),
+          pingOne: current?.ping_one || "Возвращаюсь к письму по объекту. Подскажите, актуально ли посмотреть материалы?",
+          pingTwo: current?.ping_two || "Коротко напоминаю о предложении. Если интересно, отправлю расширенный пакет сегодня.",
+          pingThree: current?.ping_three || "Последний follow-up по этому объекту. Если тема неактуальна, зафиксирую и сниму компанию с пинга.",
         };
+      }
+
+      async function loadSelectedCampaignPlaybook() {
+        if (!state.selectedCampaignId) {
+          state.selectedCampaignPlaybook = null;
+          return;
+        }
+        state.selectedCampaignPlaybook = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaignId) + "/playbook");
       }
 
       function renderActiveCompanyDetail() {
@@ -729,7 +792,8 @@ function renderBrokerPage() {
           $("activeCompanyFirstTouchBadge").textContent = "первые письма: 0";
           $("activeCompanyFollowUpBadge").textContent = "follow-up: 0";
           $("activeCompanyRecipientsBadge").textContent = "получатели: 0";
-          $("activeCompanyStatusBadge").textContent = "черновик";
+          $("activeCompanyStatusBadge").textContent = "Неактивно";
+          $("activeCompanyStatusBadge").className = objectStatusClass("draft");
           $("companyLetterSubjectInput").value = "";
           $("companyLetterBodyInput").value = "";
           $("companyPingOneInput").value = "";
@@ -739,10 +803,11 @@ function renderBrokerPage() {
           $("activeCompanyPageBadge").textContent = "1 / 1";
           $("activeCompanyPrevPageBtn").disabled = true;
           $("activeCompanyNextPageBtn").disabled = true;
+          renderCompanyStatusControls("draft");
           return;
         }
 
-        const draft = companyDraft(campaign.id, campaign);
+        const draft = companyDraft(campaign);
         const stats = campaign.stats || {};
         const targetCompanies = Array.isArray(campaign.targetCompanies) ? campaign.targetCompanies : [];
         const totalPages = Math.max(1, Math.ceil(targetCompanies.length / pageSize));
@@ -756,11 +821,13 @@ function renderBrokerPage() {
         $("activeCompanyFollowUpBadge").textContent = "follow-up: " + (stats.followUpCount || 0);
         $("activeCompanyRecipientsBadge").textContent = "получатели: " + (stats.recipientCount || 0);
         $("activeCompanyStatusBadge").textContent = objectStatusLabel(draft.status || "draft");
+        $("activeCompanyStatusBadge").className = objectStatusClass(draft.status || "draft");
         $("companyLetterSubjectInput").value = draft.subject || "";
         $("companyLetterBodyInput").value = draft.letterBody || "";
         $("companyPingOneInput").value = draft.pingOne || "";
         $("companyPingTwoInput").value = draft.pingTwo || "";
         $("companyPingThreeInput").value = draft.pingThree || "";
+        renderCompanyStatusControls(draft.status || "draft");
         $("activeCompanyRecipientsList").innerHTML = targetCompanies.length
           ? pageItems.map((company) => {
             const expanded = isRecipientCompanyExpanded(company);
@@ -796,22 +863,25 @@ function renderBrokerPage() {
         renderActiveCompanyDetail();
       }
 
-      function saveActiveCompanyDraft(nextStatus) {
+      async function saveActiveCompanyDraft(nextStatus) {
         const campaign = state.selectedCampaign;
         if (!campaign) {
           $("globalMsg").textContent = "Сначала выберите объект.";
           return;
         }
-        const all = readCompanyDrafts();
-        all[campaign.id] = {
-          status: nextStatus || companyDraft(campaign.id, campaign).status || "draft",
+        const draft = {
+          status: nextStatus || companyDraft(campaign).status || "draft",
           subject: $("companyLetterSubjectInput").value.trim(),
           letterBody: $("companyLetterBodyInput").value.trim(),
           pingOne: $("companyPingOneInput").value.trim(),
           pingTwo: $("companyPingTwoInput").value.trim(),
           pingThree: $("companyPingThreeInput").value.trim(),
         };
-        writeCompanyDrafts(all);
+        state.selectedCampaignPlaybook = await apiFetch("/broker/campaigns/" + encodeURIComponent(campaign.id) + "/playbook", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(draft),
+        });
         $("globalMsg").textContent = "Карточка объекта сохранена.";
         renderActiveCompanyDetail();
       }
@@ -836,6 +906,7 @@ function renderBrokerPage() {
           state.sentEmailsTotal = 0;
           state.selectedCampaignId = "";
           state.selectedCampaign = null;
+          state.selectedCampaignPlaybook = null;
           renderAll();
           $("globalMsg").textContent = "Token сброшен.";
         });
@@ -846,12 +917,18 @@ function renderBrokerPage() {
           }
         });
         $("saveCompanyDraftBtn").addEventListener("click", () => saveActiveCompanyDraft());
-        $("startCompanyBtn").addEventListener("click", () => saveActiveCompanyDraft("running"));
-        $("pauseCompanyBtn").addEventListener("click", () => saveActiveCompanyDraft("paused"));
+        $("toggleCompanyStatusBtn").addEventListener("click", () => {
+          const campaign = state.selectedCampaign;
+          const currentStatus = companyDraft(campaign).status || "draft";
+          saveActiveCompanyDraft(isObjectActive(currentStatus) ? "paused" : "running");
+        });
+        $("toggleCompanyStatusBtn").addEventListener("mouseenter", () => applyToggleButtonHover(true));
+        $("toggleCompanyStatusBtn").addEventListener("mouseleave", () => applyToggleButtonHover(false));
         $("stopCompanyBtn").addEventListener("click", () => saveActiveCompanyDraft("stopped"));
         $("backToCompaniesBtn").addEventListener("click", () => {
           state.selectedCampaignId = "";
           state.selectedCampaign = null;
+          state.selectedCampaignPlaybook = null;
           state.activeCompanyRecipientsPage = 1;
           state.expandedRecipientCompanies = {};
           history.pushState({}, "", "/broker");
@@ -875,7 +952,10 @@ function renderBrokerPage() {
             state.expandedRecipientCompanies = {};
             const campaign = state.campaigns.find((item) => item.id === state.selectedCampaignId);
             history.pushState({}, "", objectUrl(campaign?.property_id || campaign?.property?.id || ""));
-            loadSelectedCampaign().then(renderAll).catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
+            loadSelectedCampaign()
+              .then(() => loadSelectedCampaignPlaybook())
+              .then(renderAll)
+              .catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
             return;
           }
           const toggleRecipientCompanyButton = event.target.closest("[data-toggle-recipient-company]");
@@ -888,7 +968,7 @@ function renderBrokerPage() {
         });
         window.addEventListener("popstate", () => {
           syncSelectionFromPath()
-            .then(() => state.selectedCampaignId ? loadSelectedCampaign() : Promise.resolve())
+            .then(() => state.selectedCampaignId ? loadSelectedCampaign().then(() => loadSelectedCampaignPlaybook()) : Promise.resolve())
             .then(renderAll)
             .catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
         });

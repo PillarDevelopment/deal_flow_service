@@ -1006,6 +1006,50 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     return detail;
   });
 
+  server.get<{ Params: { id: string } }>("/campaigns/:id/playbook", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    const { data, error } = await server.db
+      .from("broker_company_playbooks")
+      .select("id,company_key,company_name,status,subject,letter_body,ping_one,ping_two,ping_three,created_at,updated_at")
+      .eq("company_key", resolved.companyKey)
+      .maybeSingle<CompanyPlaybookRow>();
+    if (error) return reply.status(500).send({ error: error.message });
+    return data ?? {
+      company_key: resolved.companyKey,
+      company_name: resolved.companyName,
+      status: "draft",
+      subject: null,
+      letter_body: null,
+      ping_one: null,
+      ping_two: null,
+      ping_three: null,
+    };
+  });
+
+  server.put<{ Params: { id: string }; Body: CompanyPlaybookBody }>("/campaigns/:id/playbook", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    const payload = {
+      company_key: resolved.companyKey,
+      company_name: normalizeString(request.body?.companyName, 240) || resolved.companyName,
+      status: normalizeNullableString(request.body?.status, 80) || "draft",
+      subject: normalizeNullableString(request.body?.subject, 4000),
+      letter_body: normalizeNullableString(request.body?.letterBody, 20000),
+      ping_one: normalizeNullableString(request.body?.pingOne, 20000),
+      ping_two: normalizeNullableString(request.body?.pingTwo, 20000),
+      ping_three: normalizeNullableString(request.body?.pingThree, 20000),
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await server.db
+      .from("broker_company_playbooks")
+      .upsert(payload, { onConflict: "company_key" })
+      .select("id,company_key,company_name,status,subject,letter_body,ping_one,ping_two,ping_three,created_at,updated_at")
+      .maybeSingle<CompanyPlaybookRow>();
+    if (error) return reply.status(500).send({ error: error.message });
+    return data ?? payload;
+  });
+
   server.patch<{ Params: { id: string }; Body: CampaignBody }>("/campaigns/:id", async (request, reply) => {
     const payload = buildCampaignPatchPayload(request.body);
     const { data, error } = await server.db
@@ -1434,6 +1478,24 @@ async function loadObjectDetail(server: FastifyInstance, objectKey: string) {
     stats: summarizeCampaignTargets(mergedTargets),
     targetCompanies,
     targets: mergedTargets,
+  };
+}
+
+async function resolvePlaybookTarget(server: FastifyInstance, campaignId: string) {
+  if (campaignId.startsWith("object:")) {
+    const detail = await loadObjectDetail(server, campaignId.slice("object:".length));
+    if (!detail) return null;
+    return {
+      companyKey: campaignId,
+      companyName: String(detail.campaign_name || "Объект"),
+    };
+  }
+  const detail = await loadCampaignDetail(server, campaignId);
+  if (!detail) return null;
+  const objectKey = `object:${objectGroupKey(detail.campaign_name || detail.property?.title || detail.property_id || campaignId)}`;
+  return {
+    companyKey: objectKey,
+    companyName: String(detail.campaign_name || detail.property?.title || "Объект"),
   };
 }
 
