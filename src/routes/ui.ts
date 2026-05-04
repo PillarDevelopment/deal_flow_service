@@ -697,6 +697,17 @@ function renderBrokerPage() {
         </section>
 
         <section class="panel stack">
+          <div class="row">
+            <div>
+              <h2>Гипотезы и ICP</h2>
+              <div class="small">Сегменты покупателей, value prop и стартовая логика, из которой собирается pipeline.</div>
+            </div>
+            <button class="btn primary" id="generateHypothesesBtn">Сгенерировать гипотезы</button>
+          </div>
+          <div id="activeCompanyHypothesesList" class="stack"></div>
+        </section>
+
+        <section class="panel stack">
           <div>
             <h2>Компании и получатели</h2>
             <div class="small">Какие компании входят в объект, кому уже отправлено и сколько follow-up.</div>
@@ -729,6 +740,7 @@ function renderBrokerPage() {
         activeCompanyRecipientsPage: 1,
         expandedRecipientCompanies: {},
         selectedCampaignPlaybook: null,
+        generatingHypotheses: false,
       };
 
       const $ = (id) => document.getElementById(id);
@@ -910,16 +922,21 @@ function renderBrokerPage() {
             const isActive = campaign.id === state.selectedCampaignId;
             const stats = campaign.stats || {};
             const planState = summarizeCampaignPlan(state.campaignPlaybooks[campaign.id]);
+            const title = String(campaign.campaign_name || "Без названия");
+            const metaObject = String(campaign.property?.title || campaign.property_id || "Объект не указан");
+            const showMetaObject = metaObject.trim() && metaObject.trim() !== title.trim();
             return (
               '<article class="campaign-card ' + planState.cardClass + (isActive ? ' active' : '') + '" data-active-campaign-id="' + escapeHtml(campaign.id || "") + '">' +
-                '<strong>' + escapeHtml(campaign.campaign_name || "Без названия") + '</strong>' +
+                '<strong>' + escapeHtml(title) + '</strong>' +
                 '<div class="row" style="margin-top:8px;">' +
                   '<span class="badge">первые: ' + escapeHtml(stats.firstTouchCount || 0) + '</span>' +
                   '<span class="badge">follow-up: ' + escapeHtml(stats.followUpCount || 0) + '</span>' +
                   '<span class="badge">получатели: ' + escapeHtml(stats.recipientCount || 0) + '</span>' +
                 '</div>' +
                 '<div class="small" style="margin-top:8px;">' + escapeHtml(campaign.objective || "Цель не указана") + '</div>' +
-                '<div class="small" style="margin-top:8px;">' + escapeHtml(campaign.property?.title || campaign.property_id || "Объект не указан") + '</div>' +
+                (showMetaObject
+                  ? '<div class="small" style="margin-top:8px;">' + escapeHtml(metaObject) + '</div>'
+                  : '') +
               '</article>'
             );
           }).join("")
@@ -1129,6 +1146,9 @@ function renderBrokerPage() {
           setPlanFact("monthly", defaultPlanProgress());
           setPlanFact("weekly", defaultPlanProgress());
           setPlanFact("daily", defaultPlanProgress());
+          $("generateHypothesesBtn").disabled = false;
+          $("generateHypothesesBtn").textContent = "Сгенерировать гипотезы";
+          $("activeCompanyHypothesesList").innerHTML = '<div class="small">Гипотезы появятся после выбора объекта.</div>';
           $("activeCompanyRecipientsList").innerHTML = '<div class="small">Получатели появятся после выбора компании.</div>';
           $("activeCompanyPageBadge").textContent = "1 / 1";
           $("activeCompanyPrevPageBtn").disabled = true;
@@ -1140,6 +1160,7 @@ function renderBrokerPage() {
         const draft = companyDraft(campaign);
         const stats = campaign.stats || {};
         const targetCompanies = Array.isArray(campaign.targetCompanies) ? campaign.targetCompanies : [];
+        const hypotheses = Array.isArray(campaign.hypotheses) ? campaign.hypotheses : [];
         const totalPages = Math.max(1, Math.ceil(targetCompanies.length / pageSize));
         const page = Math.min(Math.max(1, state.activeCompanyRecipientsPage), totalPages);
         state.activeCompanyRecipientsPage = page;
@@ -1173,6 +1194,26 @@ function renderBrokerPage() {
         setPlanFact("weekly", draft.weeklyProgress);
         setPlanFact("daily", draft.dailyProgress);
         renderCompanyStatusControls(draft.status || "draft");
+        $("generateHypothesesBtn").disabled = state.generatingHypotheses;
+        $("generateHypothesesBtn").textContent = state.generatingHypotheses ? "Генерируем..." : "Сгенерировать гипотезы";
+        $("activeCompanyHypothesesList").innerHTML = hypotheses.length
+          ? hypotheses.map((item) =>
+            '<article class="activity-row">' +
+              '<div class="row" style="align-items:flex-start;">' +
+                '<div style="flex:1;">' +
+                  '<strong>' + escapeHtml(item.segment_name || "Сегмент") + '</strong>' +
+                  '<div class="small" style="margin-top:6px;">' + escapeHtml(item.value_prop || "Без value prop") + '</div>' +
+                '</div>' +
+                '<div class="row">' +
+                  '<span class="badge">' + escapeHtml(item.segment_type || "segment") + '</span>' +
+                  '<span class="badge">prio: ' + escapeHtml(item.priority || 0) + '</span>' +
+                  '<span class="badge">' + escapeHtml(item.channel || "email") + '</span>' +
+                '</div>' +
+              '</div>' +
+              '<div class="small" style="margin-top:8px;">' + escapeHtml(item.reasoning || "Без пояснения") + '</div>' +
+            '</article>'
+          ).join("")
+          : '<div class="small">По объекту пока нет гипотез. Нажми “Сгенерировать гипотезы”, чтобы получить стартовый ICP-пакет.</div>';
         $("activeCompanyRecipientsList").innerHTML = targetCompanies.length
           ? pageItems.map((company) => {
             const expanded = isRecipientCompanyExpanded(company);
@@ -1247,6 +1288,29 @@ function renderBrokerPage() {
         renderAll();
       }
 
+      async function generateHypotheses() {
+        const campaign = state.selectedCampaign;
+        if (!campaign) {
+          $("globalMsg").textContent = "Сначала выберите объект.";
+          return;
+        }
+        state.generatingHypotheses = true;
+        renderActiveCompanyDetail();
+        try {
+          await apiFetch("/broker/campaigns/" + encodeURIComponent(campaign.id) + "/hypotheses/generate", {
+            method: "POST",
+          });
+          await loadSelectedCampaign();
+          $("globalMsg").textContent = "Гипотезы сгенерированы.";
+          renderAll();
+        } catch (err) {
+          $("globalMsg").textContent = "Ошибка генерации гипотез: " + err.message;
+        } finally {
+          state.generatingHypotheses = false;
+          renderActiveCompanyDetail();
+        }
+      }
+
       function bindEvents() {
         $("refreshBtn").addEventListener("click", refreshAll);
         $("savePlatformTokenBtn").addEventListener("click", () => {
@@ -1279,6 +1343,7 @@ function renderBrokerPage() {
           }
         });
         $("saveCompanyDraftBtn").addEventListener("click", () => saveActiveCompanyDraft());
+        $("generateHypothesesBtn").addEventListener("click", () => generateHypotheses());
         $("toggleCompanyStatusBtn").addEventListener("click", () => {
           const campaign = state.selectedCampaign;
           const currentStatus = companyDraft(campaign).status || "draft";

@@ -334,6 +334,46 @@ test("broker object playbook reads and saves real object content", async () => {
   await app.close();
 });
 
+test("broker hypothesis generator builds ICP seeds for a campaign", async () => {
+  const app = await buildTestApp();
+  const headers = authHeaders();
+
+  const created = await app.inject({
+    method: "POST",
+    url: "/broker/campaigns",
+    headers,
+    payload: {
+      propertyId: PROPERTY_ID,
+      campaignName: "Складской комплекс — hypothesis generation",
+      objective: "Собрать ICP для outbound по складу",
+      briefText: "Готовый складской объем для операторов и инвесторов.",
+      sourceVersion: "test-generator-v1",
+    },
+  });
+  assert.equal(created.statusCode, 201);
+  const campaign = created.json();
+
+  const generated = await app.inject({
+    method: "POST",
+    url: `/broker/campaigns/${campaign.id}/hypotheses/generate`,
+    headers,
+  });
+  assert.equal(generated.statusCode, 200);
+  assert.equal(generated.json().generated >= 3, true);
+  assert.equal(generated.json().items[0].campaign_id, campaign.id);
+
+  const detail = await app.inject({
+    method: "GET",
+    url: `/broker/campaigns/${campaign.id}`,
+    headers,
+  });
+  assert.equal(detail.statusCode, 200);
+  assert.equal(detail.json().hypotheses.length >= 3, true);
+  assert.equal(detail.json().hypotheses.some((item: Record<string, unknown>) => item.segment_name === "Складские операторы"), true);
+
+  await app.close();
+});
+
 async function buildTestApp() {
   const app = Fastify({ logger: false });
   const store = createStore();

@@ -140,6 +140,12 @@ function dateOrNull(value: string) {
   return text || null;
 }
 
+function trackerDateToIso(value: string) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  return `${text}T12:00:00.000+03:00`;
+}
+
 function campaignName(objectName: string) {
   return `Historical outbound: ${objectName}`;
 }
@@ -302,6 +308,8 @@ async function upsertTargets(db: SupabaseClient, campaignId: string, rows: Track
     object_role: segmentFromNotes(row.notes),
     domain: domainFromEmail(row.email),
     status: mapTargetStatus(row.status),
+    created_at: trackerDateToIso(row.sent_date) || trackerDateToIso(row.reply_date),
+    updated_at: trackerDateToIso(row.reply_date) || trackerDateToIso(row.sent_date),
   }));
 
   if (!payload.length) return 0;

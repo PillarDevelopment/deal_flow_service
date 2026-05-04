@@ -88,6 +88,15 @@ type CampaignHypothesisBody = {
   reasoning?: string;
 };
 
+type GeneratedHypothesisSeed = {
+  segmentName: string;
+  segmentType: string;
+  valueProp: string;
+  channel: string;
+  priority: number;
+  reasoning: string;
+};
+
 type CompanyPlaybookBody = {
   companyName?: string;
   status?: string;
@@ -1134,33 +1143,29 @@ export async function brokerApiRoutes(server: FastifyInstance) {
   });
 
   server.get<{ Params: { id: string } }>("/campaigns/:id/hypotheses", async (request, reply) => {
+    const resolved = await resolveHypothesisScope(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Кампания не найдена" });
     const { data, error } = await server.db
       .from("broker_campaign_hypotheses")
       .select("*")
-      .eq("campaign_id", request.params.id)
+      .in("campaign_id", resolved.campaignIds)
       .order("priority", { ascending: false })
       .order("created_at", { ascending: false });
     if (error) return reply.status(500).send({ error: error.message });
-    return { items: data ?? [] };
+    return { items: dedupeHypothesesBySegment(data ?? []) };
   });
 
   server.post<{ Params: { id: string }; Body: CampaignHypothesisBody }>("/campaigns/:id/hypotheses", async (request, reply) => {
     const auth = getAuthContext(request);
-    const payload = buildCampaignHypothesisPayload(request.body, request.params.id, auth?.userId ?? null);
+    const resolved = await resolveHypothesisScope(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Кампания не найдена" });
+    const payload = buildCampaignHypothesisPayload(request.body, resolved.primaryCampaignId, auth?.userId ?? null);
     if (!payload.segment_name) {
       return reply.status(400).send({ error: "Требуется segmentName" });
     }
     if (!payload.segment_type) {
       return reply.status(400).send({ error: "Требуется segmentType" });
     }
-
-    const { data: campaign, error: campaignError } = await server.db
-      .from("broker_campaigns")
-      .select("id")
-      .eq("id", request.params.id)
-      .maybeSingle();
-    if (campaignError) return reply.status(500).send({ error: campaignError.message });
-    if (!campaign) return reply.status(404).send({ error: "Кампания не найдена" });
 
     const { data, error } = await server.db
       .from("broker_campaign_hypotheses")
@@ -1169,6 +1174,23 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       .single();
     if (error) return reply.status(500).send({ error: error.message });
     return reply.status(201).send(data);
+  });
+
+  server.post<{ Params: { id: string } }>("/campaigns/:id/hypotheses/generate", async (request, reply) => {
+    const auth = getAuthContext(request);
+    const resolved = await resolveHypothesisScope(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Кампания не найдена" });
+
+    const seeds = generateHypothesisSeeds(resolved.objectDetail);
+    const saved = [];
+    for (const seed of seeds) {
+      saved.push(await upsertGeneratedHypothesis(server, resolved.primaryCampaignId, seed, auth?.userId ?? null));
+    }
+    return {
+      campaign_id: resolved.primaryCampaignId,
+      generated: saved.length,
+      items: saved,
+    };
   });
 
   server.patch<{ Params: { id: string }; Body: CampaignHypothesisBody }>("/campaign-hypotheses/:id", async (request, reply) => {
@@ -1558,6 +1580,33 @@ async function resolvePlaybookTarget(server: FastifyInstance, campaignId: string
   };
 }
 
+async function resolveHypothesisScope(server: FastifyInstance, campaignId: string) {
+  if (campaignId.startsWith("object:")) {
+    const objectKey = campaignId.slice("object:".length);
+    const objectDetail = await loadObjectDetail(server, objectKey);
+    if (!objectDetail || !Array.isArray(objectDetail.campaign_ids) || !objectDetail.campaign_ids.length) return null;
+    return {
+      primaryCampaignId: String(objectDetail.campaign_ids[0]),
+      campaignIds: objectDetail.campaign_ids.map((item) => String(item)),
+      objectDetail,
+    };
+  }
+  const detail = await loadCampaignDetail(server, campaignId);
+  if (!detail) return null;
+  return {
+    primaryCampaignId: String(detail.id),
+    campaignIds: [String(detail.id)],
+    objectDetail: {
+      id: `object:${objectGroupKey(detail.campaign_name || detail.property?.title || detail.property_id || detail.id)}`,
+      campaign_name: detail.campaign_name,
+      property: detail.property,
+      brief: detail.brief,
+      objective: detail.objective,
+      hypotheses: detail.hypotheses,
+    },
+  };
+}
+
 function emptyCampaignStats() {
   return {
     firstTouchCount: 0,
@@ -1679,6 +1728,137 @@ function extractPlansFromLetterBody(letterBody: string | null) {
   }
 }
 
+function dedupeHypothesesBySegment(items: Array<Record<string, unknown>>) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = `${normalizeString(item.segment_name, 240).toLowerCase()}::${normalizeString(item.segment_type, 120).toLowerCase()}`;
+    if (!key.trim()) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function generateHypothesisSeeds(detail: Record<string, unknown>): GeneratedHypothesisSeed[] {
+  const property = (detail.property && typeof detail.property === "object") ? detail.property as Record<string, unknown> : {};
+  const brief = (detail.brief && typeof detail.brief === "object") ? detail.brief as Record<string, unknown> : {};
+  const attrs = (property.attributes && typeof property.attributes === "object") ? property.attributes as Record<string, unknown> : {};
+  const haystack = [
+    detail.campaign_name,
+    property.title,
+    property.address,
+    detail.objective,
+    brief.original_brief,
+    JSON.stringify(attrs),
+  ].map((item) => String(item || "")).join(" ").toLowerCase();
+
+  if (/(warehouse|склад|логист|3pl|fulfillment)/i.test(haystack)) {
+    return [
+      seed("Складские операторы", "tenant", "Готовый складской объем под размещение операционной логистики и last-mile модели.", "email", 10, "Первый ICP: 3PL, e-commerce, fulfillment и дистрибуция. С этого сегмента начинается tenant pipeline."),
+      seed("Инвесторы в складскую недвижимость", "investor", "Доходный или value-add складской актив для профильного инвестора.", "email", 8, "Вторая волна: частные и институциональные инвесторы в складской продукт."),
+      seed("Индустриальные брокеры", "broker", "Брокеры со складским мандатом могут быстро привести профильных пользователей.", "broker", 7, "Использовать для ускорения покрытия рынка и проверки внешнего спроса."),
+    ];
+  }
+
+  if (/(га\b|зем|участ|ижс|малоэтаж|коттедж|land)/i.test(haystack)) {
+    return [
+      seed("Девелоперы малоэтажных поселков", "developer", "Земельный массив под phased low-rise / cottage development.", "email", 10, "Главный ICP для активного land pipeline: поселковый девелопмент и малоэтажный продукт."),
+      seed("Landbank-инвесторы", "investor", "Покупка земли с горизонтом капитализации и последующей упаковки.", "email", 9, "Вторая волна: земельные инвесторы и семейные капиталы, которые держат участок как landbank."),
+      seed("Операторы parceling / ИЖС", "operator", "Участок для нарезки, очередности продаж и быстрой фазовой монетизации.", "email", 8, "Практический ICP для более короткого цикла, чем у классических девелоперов."),
+      seed("Земельные брокеры и партнеры", "broker", "Партнерский канал для расширения buyer universe по земле.", "broker", 6, "Подключать после первой прямой волны, чтобы ускорить покрытие land market."),
+    ];
+  }
+
+  if (/(бизнес-квартал|офис|бизнес-центр|офисный центр|hq|headquarter)/i.test(haystack)) {
+    return [
+      seed("Owner-user офисные покупатели", "owner_user", "Офисный актив для собственного размещения HQ, private office или корпоративного блока.", "email", 10, "Стартовый ICP для офисов: компании, которым нужно купить, а не арендовать офис."),
+      seed("Офисные инвесторы", "investor", "Ликвидный офисный продукт у метро или отдельно стоящее здание под инвестиционный hold.", "email", 8, "Вторая волна: инвесторы, которые понимают офисный cash-flow или value-add."),
+      seed("Клиники и образование", "owner_user", "Отдельные офисные здания и крупные блоки часто подходят под med / education use.", "email", 7, "Особенно важно для stand-alone office center и крупных блоков."),
+      seed("Офисные брокеры", "broker", "Tenant reps и office brokers как канал ускорения по owner-user спросу.", "broker", 6, "Подключать после запуска direct outreach по named accounts."),
+    ];
+  }
+
+  if (/(тверская|арбат|street|ритейл|торгов|помещен|витрин|фасад|проспект)/i.test(haystack)) {
+    const central = /(тверская|арбат|цао)/i.test(haystack);
+    if (central) {
+      return [
+        seed("Флагманские retail-операторы", "tenant", "Центральная точка под flagship retail, beauty, fashion, jewelry или premium gifting.", "email", 10, "Первый ICP для trophy high-street: операторы, которым нужен адрес и фасад."),
+        seed("Ресторанные группы", "tenant", "Локация под premium food, restaurant или hospitality format.", "email", 9, "Ключевой сегмент для крупных и центральных street-retail объектов."),
+        seed("UHNW и private investors", "investor", "Трофейный актив для частного капитала, который покупает локацию и защитный cash-flow.", "email", 8, "Инвесторская волна должна идти через ограниченный private circulation."),
+        seed("Сильные street-retail брокеры", "broker", "Узкий круг брокеров с доступом к flagship tenants и центральным пользователям.", "broker", 7, "Не массовый рынок, а controlled broker channel."),
+      ];
+    }
+    return [
+      seed("Сетевые сервисные операторы", "tenant", "Street-retail формат под кофе, аптеку, beauty, связь, цветы, табак и повседневный сервис.", "email", 10, "Основной ICP для районного и малого street retail."),
+      seed("Франчайзи и малые сети", "tenant", "Помещение под быстрый запуск оператора с небольшой площадью и понятным потоком.", "email", 9, "Вторая волна для ускорения first-touch и просмотра."),
+      seed("Частные инвесторы в малый ритейл", "investor", "Небольшой ликвидный лот под покупку и сдачу конечному арендатору.", "email", 8, "Investor pipeline важен почти для каждого малого retail box."),
+      seed("Street-retail брокеры", "broker", "Внешние брокеры расширяют канал по сетям и франчайзи быстрее прямого обзвона.", "broker", 6, "Использовать как multiplier после первичной прямой волны."),
+    ];
+  }
+
+  return [
+    seed("Профильные owner-user покупатели", "owner_user", "Базовый ICP для прямого пользователя, который может купить объект под собственные задачи.", "email", 9, "Стартовая гипотеза на случай, если объект еще не сегментирован."),
+    seed("Частные инвесторы", "investor", "Инвестиционный спрос на объект с потенциалом доходности или перепозиционирования.", "email", 8, "Вторая волна почти для любого коммерческого объекта."),
+    seed("Партнерские брокеры", "broker", "Брокерский канал для расширения buyer universe и быстрой проверки рынка.", "broker", 6, "Подключается после первичного прямого теста спроса."),
+  ];
+}
+
+function seed(
+  segmentName: string,
+  segmentType: string,
+  valueProp: string,
+  channel: string,
+  priority: number,
+  reasoning: string,
+): GeneratedHypothesisSeed {
+  return { segmentName, segmentType, valueProp, channel, priority, reasoning };
+}
+
+async function upsertGeneratedHypothesis(
+  server: FastifyInstance,
+  campaignId: string,
+  item: GeneratedHypothesisSeed,
+  createdBy: string | null,
+) {
+  const { data: existing, error: existingError } = await server.db
+    .from("broker_campaign_hypotheses")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .eq("segment_name", item.segmentName)
+    .eq("segment_type", item.segmentType)
+    .maybeSingle();
+  if (existingError) throw new Error(existingError.message);
+
+  const payload = buildCampaignHypothesisPayload({
+    segmentName: item.segmentName,
+    segmentType: item.segmentType,
+    valueProp: item.valueProp,
+    channel: item.channel,
+    priority: item.priority,
+    status: "approved",
+    reasoning: item.reasoning,
+  }, campaignId, createdBy);
+
+  if (existing?.id) {
+    const { data, error } = await server.db
+      .from("broker_campaign_hypotheses")
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error) throw new Error(error.message);
+    return data;
+  }
+
+  const { data, error } = await server.db
+    .from("broker_campaign_hypotheses")
+    .insert(payload)
+    .select("*")
+    .single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
 function embedPlansInLetterBody(letterBody: string | null, plans: {
   monthlyPlan: ObjectPlan;
   weeklyPlan: ObjectPlan;
@@ -1770,12 +1950,13 @@ function buildObjectPlanProgress(plan: ObjectPlan, targets: CampaignTargetRow[],
         uniqueCompanies.add(normalizeString(target.company_name, 240).toLowerCase() || target.email.toLowerCase());
       }
     }
-    if (updatedAt) {
+    const followUpAt = target.created_at || updatedAt;
+    if (followUpAt) {
       const updatedKey = scope === "month"
-        ? moscowMonthKey(updatedAt)
+        ? moscowMonthKey(followUpAt)
         : scope === "week"
-          ? moscowWeekKey(updatedAt)
-          : moscowDayKey(updatedAt);
+          ? moscowWeekKey(followUpAt)
+          : moscowDayKey(followUpAt);
       if (updatedKey === currentCreatedKey && target.status === "followed_up") {
         followUpCount += 1;
       }
