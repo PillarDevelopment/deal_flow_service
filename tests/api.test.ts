@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { AmoCrmClient } from "../src/amocrm.js";
 import { brokerApiRoutes } from "../src/routes/api.js";
 import type { AppRole } from "../src/types.js";
 
@@ -374,12 +375,61 @@ test("broker hypothesis generator builds ICP seeds for a campaign", async () => 
   await app.close();
 });
 
+test("broker amo export sends replied companies once and skips duplicates", async () => {
+  const app = await buildTestApp();
+  const headers = authHeaders();
+
+  const firstExport = await app.inject({
+    method: "POST",
+    url: "/broker/campaigns/00000000-0000-4000-8000-000000000303/amo/export-replied",
+    headers,
+    payload: {
+      baseUrl: "https://test.amocrm.ru",
+      accessToken: "token",
+      pipelineId: 11,
+      statusId: 22,
+    },
+  });
+  assert.equal(firstExport.statusCode, 200);
+  assert.equal(firstExport.json().summary.totalCandidates, 2);
+  assert.equal(firstExport.json().summary.exportedCount, 1);
+  assert.equal(firstExport.json().summary.skippedExistingCount, 1);
+  assert.equal(firstExport.json().summary.failedCount, 0);
+
+  const secondExport = await app.inject({
+    method: "POST",
+    url: "/broker/campaigns/00000000-0000-4000-8000-000000000303/amo/export-replied",
+    headers,
+    payload: {
+      baseUrl: "https://test.amocrm.ru",
+      accessToken: "token",
+      pipelineId: 11,
+      statusId: 22,
+    },
+  });
+  assert.equal(secondExport.statusCode, 200);
+  assert.equal(secondExport.json().summary.exportedCount, 0);
+  assert.equal(secondExport.json().summary.skippedLocalCount, 2);
+
+  const detail = await app.inject({
+    method: "GET",
+    url: "/broker/campaigns/00000000-0000-4000-8000-000000000303",
+    headers,
+  });
+  assert.equal(detail.statusCode, 200);
+  assert.equal(detail.json().amoExportStats.exportedCount, 1);
+  assert.equal(detail.json().amoExportStats.needsReviewCount, 1);
+
+  await app.close();
+});
+
 async function buildTestApp() {
   const app = Fastify({ logger: false });
   const store = createStore();
 
   app.decorate("db", createFakeDb(store));
   app.decorate("auth", createFakeAuth());
+  app.decorate("amoCrm", createFakeAmoCrm());
   await app.register(brokerApiRoutes, { prefix: "/broker" });
 
   return app;
@@ -437,6 +487,28 @@ function createStore(): Store {
         status: "followed_up",
         created_at: "2026-05-01T12:00:00.000Z",
         updated_at: "2026-05-01T13:00:00.000Z",
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000305",
+        campaign_id: "00000000-0000-4000-8000-000000000303",
+        company_name: "Новый логистический партнер",
+        contact_name: "Мария",
+        email: "reply@warehouse.example",
+        domain: "warehouse.example",
+        status: "replied",
+        created_at: "2026-05-01T14:00:00.000Z",
+        updated_at: "2026-05-01T14:30:00.000Z",
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000306",
+        campaign_id: "00000000-0000-4000-8000-000000000303",
+        company_name: "Уже в amo",
+        contact_name: "Олег",
+        email: "existing@warehouse.example",
+        domain: "existing.example",
+        status: "replied",
+        created_at: "2026-05-01T15:00:00.000Z",
+        updated_at: "2026-05-01T15:30:00.000Z",
       },
     ],
     broker_company_directory: [
@@ -501,6 +573,27 @@ function createFakeAuth() {
       },
     },
   } as unknown as SupabaseClient;
+}
+
+function createFakeAmoCrm() {
+  return {
+    async getAccount() {
+      return {
+        id: 1,
+        name: "Test amoCRM",
+        subdomain: "test",
+      };
+    },
+    async findDuplicate(_config, input) {
+      if (input.email === "existing@warehouse.example") {
+        return { exists: true, entityType: "lead", externalId: "amo-existing-1" };
+      }
+      return { exists: false, entityType: null, externalId: null };
+    },
+    async createLead(_config, input) {
+      return { id: `lead:${input.email}` };
+    },
+  } as AmoCrmClient;
 }
 
 function createFakeDb(store: Store) {

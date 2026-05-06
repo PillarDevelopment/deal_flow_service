@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { getAuthContext, requireSuperAdmin } from "../auth.js";
+import { getAmoCrmClient, normalizeAmoCrmConfig } from "../amocrm.js";
 import {
   normalizeCampaignStatus,
   normalizeActivityType,
@@ -110,6 +111,14 @@ type CompanyPlaybookBody = {
   dailyPlan?: Record<string, unknown>;
 };
 
+type AmoCrmBody = {
+  baseUrl?: string;
+  accessToken?: string;
+  pipelineId?: number | string;
+  statusId?: number | string;
+  responsibleUserId?: number | string;
+};
+
 type CampaignTargetRow = {
   id: string;
   campaign_id: string;
@@ -196,6 +205,20 @@ type CompanyPlaybookRow = {
   updated_at: string;
 };
 
+type AmoExportRow = {
+  id: string;
+  campaign_id: string;
+  deal_id: string | null;
+  contact_id: string | null;
+  export_type: string;
+  payload: Record<string, unknown> | null;
+  status: string;
+  external_id: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type ObjectPlan = {
   firstTouchTarget: number;
   followUpTarget: number;
@@ -220,6 +243,7 @@ const PLAYBOOK_BASE_SELECT = "id,company_key,company_name,status,subject,letter_
 const PLAYBOOK_PLAN_SELECT = `${PLAYBOOK_BASE_SELECT},monthly_plan,weekly_plan,daily_plan`;
 const PLAYBOOK_PLAN_MARKER_PREFIX = "\n<!--broker_plan:";
 const PLAYBOOK_PLAN_MARKER_SUFFIX = "-->";
+const QUALIFIED_REPLY_EXPORT_TYPE = "qualified_reply_lead";
 
 type AggregatedObjectRow = {
   id: string;
@@ -251,6 +275,16 @@ export async function brokerApiRoutes(server: FastifyInstance) {
 
   server.get("/me", async (request) => {
     return getAuthContext(request);
+  });
+
+  server.post<{ Body: AmoCrmBody }>("/amo/test", async (request, reply) => {
+    try {
+      const config = normalizeAmoCrmConfig(request.body || {});
+      const account = await getAmoCrmClient(server).getAccount(config);
+      return { ok: true, account };
+    } catch (error) {
+      return reply.status(400).send({ error: error instanceof Error ? error.message : "Не удалось проверить amoCRM" });
+    }
   });
 
   server.get<{ Querystring: ListQuery }>("/clients", async (request, reply) => {
@@ -1046,6 +1080,128 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     return detail;
   });
 
+  server.post<{ Params: { id: string }; Body: AmoCrmBody }>("/campaigns/:id/amo/export-replied", async (request, reply) => {
+    let config;
+    try {
+      config = normalizeAmoCrmConfig(request.body || {});
+    } catch (error) {
+      return reply.status(400).send({ error: error instanceof Error ? error.message : "Некорректные настройки amoCRM" });
+    }
+
+    const scope = await loadExportScope(server, request.params.id);
+    if (!scope) {
+      return reply.status(404).send({ error: "Кампания не найдена" });
+    }
+
+    const auth = getAuthContext(request);
+    const existingRows = await loadAmoExportsByCampaignIds(server, scope.campaignIds);
+    const existingBySourceKey = latestAmoExportsBySourceKey(existingRows);
+    const targetCompanies = Array.from(groupCampaignTargetsByCompany(scope.targets).values())
+      .filter((item) => item.repliedCount > 0);
+
+    const summary = {
+      totalCandidates: targetCompanies.length,
+      exportedCount: 0,
+      skippedLocalCount: 0,
+      skippedExistingCount: 0,
+      failedCount: 0,
+      items: [] as Array<Record<string, unknown>>,
+    };
+
+    for (const company of targetCompanies) {
+      const repliedRecipients = company.recipients.filter((item) => item.status === "replied");
+      const primaryRecipient = repliedRecipients[0] || company.recipients[0];
+      const sourceKey = exportSourceKey(scope.scopeKey, company.companyKey);
+      const existing = existingBySourceKey.get(sourceKey);
+
+      if (existing && (existing.status === "exported" || existing.status === "needs_review" || existing.status === "pending")) {
+        summary.skippedLocalCount += 1;
+        summary.items.push({
+          companyName: company.companyName,
+          status: "skipped_local",
+          reason: existing.status,
+          externalId: existing.external_id,
+        });
+        continue;
+      }
+
+      const note = buildAmoLeadNote(scope.objectName, scope.objective, repliedRecipients);
+      const leadInput = {
+        leadName: `${company.companyName} — ${scope.objectName}`,
+        companyName: company.companyName,
+        contactName: normalizeNullableString(primaryRecipient?.contactName, 240),
+        email: String(primaryRecipient?.email || ""),
+        objectName: scope.objectName,
+        note,
+      };
+
+      try {
+        const duplicate = await getAmoCrmClient(server).findDuplicate(config, leadInput);
+        if (duplicate.exists) {
+          summary.skippedExistingCount += 1;
+          await persistAmoExport(server, {
+            campaign_id: scope.primaryCampaignId,
+            contact_id: normalizeNullableString(String(primaryRecipient?.targetId || ""), 120),
+            export_type: QUALIFIED_REPLY_EXPORT_TYPE,
+            payload: buildAmoExportPayload(scope, company, sourceKey, auth?.userId || null),
+            status: "needs_review",
+            external_id: duplicate.externalId,
+            last_error: `duplicate:${duplicate.entityType || "unknown"}`,
+          });
+          summary.items.push({
+            companyName: company.companyName,
+            status: "skipped_existing",
+            duplicateType: duplicate.entityType,
+            externalId: duplicate.externalId,
+          });
+          continue;
+        }
+
+        const created = await getAmoCrmClient(server).createLead(config, leadInput);
+        await persistAmoExport(server, {
+          campaign_id: scope.primaryCampaignId,
+          contact_id: normalizeNullableString(String(primaryRecipient?.targetId || ""), 120),
+          export_type: QUALIFIED_REPLY_EXPORT_TYPE,
+          payload: buildAmoExportPayload(scope, company, sourceKey, auth?.userId || null),
+          status: "exported",
+          external_id: created.id,
+          last_error: null,
+        });
+        summary.exportedCount += 1;
+        summary.items.push({
+          companyName: company.companyName,
+          status: "exported",
+          externalId: created.id,
+        });
+      } catch (error) {
+        summary.failedCount += 1;
+        await persistAmoExport(server, {
+          campaign_id: scope.primaryCampaignId,
+          contact_id: normalizeNullableString(String(primaryRecipient?.targetId || ""), 120),
+          export_type: QUALIFIED_REPLY_EXPORT_TYPE,
+          payload: buildAmoExportPayload(scope, company, sourceKey, auth?.userId || null),
+          status: "failed",
+          external_id: null,
+          last_error: error instanceof Error ? error.message : "Неизвестная ошибка",
+        });
+        summary.items.push({
+          companyName: company.companyName,
+          status: "failed",
+          error: error instanceof Error ? error.message : "Неизвестная ошибка",
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      scope: {
+        id: scope.scopeKey,
+        objectName: scope.objectName,
+      },
+      summary,
+    };
+  });
+
   server.get<{ Params: { id: string } }>("/campaigns/:id/playbook", async (request, reply) => {
     const resolved = await resolvePlaybookTarget(server, request.params.id);
     if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
@@ -1461,13 +1617,19 @@ async function loadCampaignDetail(server: FastifyInstance, campaignId: string) {
     throw new Error(targetsError.message);
   }
 
+  const amoExports = await loadAmoExportsByCampaignIds(server, [campaignId]);
+  const amoExportByCompany = latestAmoExportsByCompany(amoExports);
   const stats = summarizeCampaignTargets(targets || []);
   const companies = Array.from(groupCampaignTargetsByCompany(targets || []).values())
     .map((item) => ({
+      companyKey: item.companyKey,
       companyName: item.companyName,
       firstTouchCount: item.firstTouchCount,
       followUpCount: item.followUpCount,
+      repliedCount: item.repliedCount,
       uniqueEmailCount: item.uniqueEmails.size,
+      amoExportStatus: amoExportByCompany.get(item.companyKey)?.status || null,
+      amoExternalId: amoExportByCompany.get(item.companyKey)?.external_id || null,
       recipients: item.recipients.sort((a, b) => String(a.email || "").localeCompare(String(b.email || ""))),
     }))
     .sort((a, b) =>
@@ -1482,6 +1644,7 @@ async function loadCampaignDetail(server: FastifyInstance, campaignId: string) {
     brief: brief ?? null,
     hypotheses: hypotheses ?? [],
     stats,
+    amoExportStats: summarizeAmoExports(amoExports),
     targetCompanies: companies,
     targets: targets ?? [],
   };
@@ -1530,13 +1693,19 @@ async function loadObjectDetail(server: FastifyInstance, objectKey: string) {
   if (hypothesesError) throw new Error(hypothesesError.message);
   if (targetsError) throw new Error(targetsError.message);
 
+  const amoExports = await loadAmoExportsByCampaignIds(server, rawCampaignIds);
+  const amoExportByCompany = latestAmoExportsByCompany(amoExports);
   const mergedTargets = targets ?? [];
   const targetCompanies = Array.from(groupCampaignTargetsByCompany(mergedTargets).values())
     .map((item) => ({
+      companyKey: item.companyKey,
       companyName: item.companyName,
       firstTouchCount: item.firstTouchCount,
       followUpCount: item.followUpCount,
+      repliedCount: item.repliedCount,
       uniqueEmailCount: item.uniqueEmails.size,
+      amoExportStatus: amoExportByCompany.get(item.companyKey)?.status || null,
+      amoExternalId: amoExportByCompany.get(item.companyKey)?.external_id || null,
       recipients: item.recipients.sort((a, b) => String(a.email || "").localeCompare(String(b.email || ""))),
     }))
     .sort((a, b) =>
@@ -1557,6 +1726,7 @@ async function loadObjectDetail(server: FastifyInstance, objectKey: string) {
     briefs: briefs ?? [],
     hypotheses: hypotheses ?? [],
     stats: summarizeCampaignTargets(mergedTargets),
+    amoExportStats: summarizeAmoExports(amoExports),
     targetCompanies,
     targets: mergedTargets,
   };
@@ -2064,26 +2234,32 @@ function summarizeCampaignTargets(targets: CampaignTargetRow[]) {
 
 function groupCampaignTargetsByCompany(targets: CampaignTargetRow[]) {
   const byCompany = new Map<string, {
+    companyKey: string;
     companyName: string;
     firstTouchCount: number;
     followUpCount: number;
+    repliedCount: number;
     uniqueEmails: Set<string>;
     recipients: Array<Record<string, unknown>>;
   }>();
 
   for (const target of targets) {
-    const key = normalizeString(target.company_name, 240).toLowerCase() || target.email.toLowerCase();
+    const key = campaignTargetCompanyKey(target.company_name, target.email);
     const item = byCompany.get(key) || {
+      companyKey: key,
       companyName: target.company_name || target.email,
       firstTouchCount: 0,
       followUpCount: 0,
+      repliedCount: 0,
       uniqueEmails: new Set<string>(),
       recipients: [],
     };
     if (isFirstTouchStatus(target.status)) item.firstTouchCount += 1;
     if (target.status === "followed_up") item.followUpCount += 1;
+    if (target.status === "replied") item.repliedCount += 1;
     item.uniqueEmails.add(target.email.toLowerCase());
     item.recipients.push({
+      targetId: target.id,
       email: target.email,
       contactName: target.contact_name,
       status: target.status,
@@ -2094,6 +2270,142 @@ function groupCampaignTargetsByCompany(targets: CampaignTargetRow[]) {
   }
 
   return byCompany;
+}
+
+function campaignTargetCompanyKey(companyName: string, email: string) {
+  return normalizeString(companyName, 240).toLowerCase() || String(email || "").trim().toLowerCase();
+}
+
+async function loadAmoExportsByCampaignIds(server: FastifyInstance, campaignIds: string[]) {
+  if (!campaignIds.length) return [] as AmoExportRow[];
+  const { data, error } = await server.db
+    .from("broker_amo_exports")
+    .select("id,campaign_id,deal_id,contact_id,export_type,payload,status,external_id,last_error,created_at,updated_at")
+    .in("campaign_id", campaignIds)
+    .returns<AmoExportRow[]>();
+  if (error) throw new Error(error.message);
+  return (data || []).filter((item) => item.export_type === QUALIFIED_REPLY_EXPORT_TYPE);
+}
+
+function latestAmoExportsByCompany(rows: AmoExportRow[]) {
+  const map = new Map<string, AmoExportRow>();
+  for (const row of rows) {
+    const companyKey = normalizeString(row.payload?.company_key, 240).toLowerCase();
+    if (!companyKey) continue;
+    const current = map.get(companyKey);
+    if (!current || String(current.updated_at || "") < String(row.updated_at || "")) {
+      map.set(companyKey, row);
+    }
+  }
+  return map;
+}
+
+function latestAmoExportsBySourceKey(rows: AmoExportRow[]) {
+  const map = new Map<string, AmoExportRow>();
+  for (const row of rows) {
+    const sourceKey = normalizeString(row.payload?.source_key, 400).toLowerCase();
+    if (!sourceKey) continue;
+    const current = map.get(sourceKey);
+    if (!current || String(current.updated_at || "") < String(row.updated_at || "")) {
+      map.set(sourceKey, row);
+    }
+  }
+  return map;
+}
+
+function summarizeAmoExports(rows: AmoExportRow[]) {
+  return rows.reduce((acc, row) => {
+    if (row.status === "exported") acc.exportedCount += 1;
+    if (row.status === "failed") acc.failedCount += 1;
+    if (row.status === "needs_review") acc.needsReviewCount += 1;
+    if (row.status === "pending") acc.pendingCount += 1;
+    return acc;
+  }, {
+    exportedCount: 0,
+    failedCount: 0,
+    needsReviewCount: 0,
+    pendingCount: 0,
+  });
+}
+
+async function loadExportScope(server: FastifyInstance, id: string) {
+  if (id.startsWith("object:")) {
+    const objectKey = id.slice("object:".length);
+    const detail = await loadObjectDetail(server, objectKey);
+    if (!detail) return null;
+    const campaignIds = Array.isArray(detail.campaign_ids) ? detail.campaign_ids.map((item) => String(item)) : [];
+    return {
+      scopeKey: id,
+      primaryCampaignId: campaignIds[0] || "",
+      campaignIds,
+      targets: Array.isArray(detail.targets) ? detail.targets as CampaignTargetRow[] : [],
+      objectName: String(detail.campaign_name || detail.property?.title || "Объект"),
+      objective: normalizeNullableString(detail.objective, 4000),
+    };
+  }
+  const detail = await loadCampaignDetail(server, id);
+  if (!detail) return null;
+  return {
+    scopeKey: `object:${objectGroupKey(String(detail.campaign_name || detail.property?.title || detail.id))}`,
+    primaryCampaignId: String(detail.id),
+    campaignIds: [String(detail.id)],
+    targets: Array.isArray(detail.targets) ? detail.targets as CampaignTargetRow[] : [],
+    objectName: String(detail.campaign_name || detail.property?.title || "Объект"),
+    objective: normalizeNullableString(detail.objective, 4000),
+  };
+}
+
+function exportSourceKey(scopeKey: string, companyKey: string) {
+  return `${normalizeString(scopeKey, 240).toLowerCase()}::${normalizeString(companyKey, 240).toLowerCase()}`;
+}
+
+function buildAmoLeadNote(objectName: string, objective: string | null, recipients: Array<Record<string, unknown>>) {
+  const lines = [
+    `Object: ${objectName}`,
+    objective ? `Objective: ${objective}` : "",
+    "Replied contacts:",
+    ...recipients.map((item) => {
+      const email = String(item.email || "");
+      const contactName = String(item.contactName || "");
+      return `- ${contactName ? `${contactName} ` : ""}<${email}>`;
+    }),
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+function buildAmoExportPayload(
+  scope: { scopeKey: string; objectName: string; objective: string | null },
+  company: {
+    companyKey: string;
+    companyName: string;
+    repliedCount: number;
+    recipients: Array<Record<string, unknown>>;
+  },
+  sourceKey: string,
+  exportedBy: string | null,
+) {
+  return {
+    source_key: sourceKey,
+    scope_key: scope.scopeKey,
+    object_name: scope.objectName,
+    objective: scope.objective,
+    company_key: company.companyKey,
+    company_name: company.companyName,
+    replied_count: company.repliedCount,
+    replied_recipients: company.recipients
+      .filter((item) => item.status === "replied")
+      .map((item) => ({
+        target_id: item.targetId,
+        email: item.email,
+        contact_name: item.contactName,
+      })),
+    exported_by: exportedBy,
+  };
+}
+
+async function persistAmoExport(server: FastifyInstance, payload: Record<string, unknown>) {
+  const { error } = await server.db.from("broker_amo_exports").insert(payload);
+  if (error) throw new Error(error.message);
 }
 
 async function loadPropertiesIndex(server: FastifyInstance, propertyIds: string[]) {

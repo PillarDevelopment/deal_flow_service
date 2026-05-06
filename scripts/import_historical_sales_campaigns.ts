@@ -183,7 +183,7 @@ async function getProperties(db: SupabaseClient) {
 }
 
 function propertyForObject(objectName: string, properties: PropertyRow[]) {
-  const title = PROPERTY_ALIASES[objectName];
+  const title = PROPERTY_ALIASES[objectName] || objectName;
   const property = properties.find((item) => item.title === title);
   if (!property) throw new Error(`No property mapping for object "${objectName}" -> "${title || ""}"`);
   return property;
