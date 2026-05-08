@@ -30,6 +30,21 @@ type TrackerRow = {
   notes: string;
 };
 
+const TRACKER_HEADER = [
+  "object",
+  "company",
+  "email",
+  "sent_date",
+  "reply_date",
+  "reply_type",
+  "interested",
+  "call_scheduled",
+  "materials_requested",
+  "status",
+  "next_action",
+  "notes",
+];
+
 type PropertyRow = {
   id: string;
   title: string;
@@ -99,7 +114,14 @@ function readCsv<T>(filePath: string): T[] {
     rows.push(row);
   }
 
-  const [header, ...body] = rows;
+  if (!rows.length) return [];
+
+  let [header, ...body] = rows;
+  if (header[0] !== "object" && header.length === TRACKER_HEADER.length) {
+    body = rows;
+    header = TRACKER_HEADER;
+  }
+
   return body
     .filter((item) => item.length === header.length)
     .map((item) => Object.fromEntries(header.map((key, index) => [key, item[index] || ""])) as T);

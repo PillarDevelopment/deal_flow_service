@@ -602,6 +602,19 @@ function renderBrokerPage() {
             <span class="badge" id="activeCompanyStatusBadge">draft</span>
           </div>
           <div class="row">
+            <span class="badge" id="activeCompanyAddressBadge">адрес: -</span>
+            <span class="badge" id="activeCompanyPriceBadge">цена: -</span>
+            <span class="badge" id="activeCompanyAreaBadge">площадь: -</span>
+            <span class="badge" id="activeCompanyPricePerSqmBadge">цена/м²: -</span>
+          </div>
+          <div id="activeCompanyImageWrap" class="hidden">
+            <img
+              id="activeCompanyImage"
+              alt=""
+              style="width:100%; max-height:360px; object-fit:cover; border-radius:18px; border:1px solid var(--line); background:rgba(255,255,255,0.72);"
+            />
+          </div>
+          <div class="row">
             <button class="btn primary" id="exportAmoRepliesBtn">Экспортировать ответы в amoCRM</button>
           </div>
           <div class="plan-summary-grid">
@@ -1162,6 +1175,36 @@ function renderBrokerPage() {
         $(prefix + "PlanCompletionMeta").textContent = totalActual + " / " + totalTarget;
       }
 
+      function formatRub(value) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount <= 0) return "-";
+        return amount.toLocaleString("ru-RU") + " ₽";
+      }
+
+      function formatSqm(value) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount <= 0) return "-";
+        return amount.toLocaleString("ru-RU", { minimumFractionDigits: amount % 1 ? 1 : 0, maximumFractionDigits: 1 }) + " м²";
+      }
+
+      function renderPropertyBadges(property) {
+        $("activeCompanyAddressBadge").textContent = "адрес: " + (property?.address || "—");
+        $("activeCompanyPriceBadge").textContent = "цена: " + formatRub(property?.price_rub);
+        $("activeCompanyAreaBadge").textContent = "площадь: " + formatSqm(property?.area_sqm);
+        $("activeCompanyPricePerSqmBadge").textContent = "цена/м²: " + formatRub(property?.price_per_sqm);
+      }
+
+      function propertyMainImage(property) {
+        const media = property?.attributes?.media;
+        return media?.main_url || "";
+      }
+
+      function renderPropertyImage(property) {
+        const src = propertyMainImage(property);
+        $("activeCompanyImageWrap").classList.toggle("hidden", !src);
+        $("activeCompanyImage").src = src || "";
+      }
+
       async function loadSelectedCampaignPlaybook() {
         if (!state.selectedCampaignId) {
           state.selectedCampaignPlaybook = null;
@@ -1187,6 +1230,8 @@ function renderBrokerPage() {
           $("activeCompanyAmoExportsBadge").textContent = "amo: 0";
           $("activeCompanyStatusBadge").textContent = "Неактивно";
           $("activeCompanyStatusBadge").className = objectStatusClass("draft");
+          renderPropertyBadges(null);
+          renderPropertyImage(null);
           $("companyLetterSubjectInput").value = "";
           $("companyLetterBodyInput").value = "";
           $("companyPingOneInput").value = "";
@@ -1222,6 +1267,7 @@ function renderBrokerPage() {
 
         const draft = companyDraft(campaign);
         const stats = campaign.stats || {};
+        const property = campaign.property || null;
         const amoExportStats = campaign.amoExportStats || {};
         const targetCompanies = Array.isArray(campaign.targetCompanies) ? campaign.targetCompanies : [];
         const hypotheses = Array.isArray(campaign.hypotheses) ? campaign.hypotheses : [];
@@ -1239,6 +1285,8 @@ function renderBrokerPage() {
         $("activeCompanyAmoExportsBadge").textContent = "amo: " + (amoExportStats.exportedCount || 0);
         $("activeCompanyStatusBadge").textContent = objectStatusLabel(draft.status || "draft");
         $("activeCompanyStatusBadge").className = objectStatusClass(draft.status || "draft");
+        renderPropertyBadges(property);
+        renderPropertyImage(property);
         $("companyLetterSubjectInput").value = draft.subject || "";
         $("companyLetterBodyInput").value = draft.letterBody || "";
         $("companyPingOneInput").value = draft.pingOne || "";
