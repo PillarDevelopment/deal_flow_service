@@ -1,10 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import { getOptionalEnv } from "../env.js";
-
-type BrokerLoginBody = {
-  email?: string;
-  password?: string;
-};
 
 export async function brokerUiRoutes(server: FastifyInstance) {
   server.get("/broker", async (_request, reply) => {
@@ -14,47 +8,9 @@ export async function brokerUiRoutes(server: FastifyInstance) {
   server.get("/broker/object/:propertyId", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(renderBrokerPage());
   });
-
-  server.post<{ Body: BrokerLoginBody }>("/broker/login", async (request, reply) => {
-    const email = String(request.body?.email || "").trim().toLowerCase();
-    const password = String(request.body?.password || "");
-    if (!email || !password) {
-      return reply.status(400).send({ error: "Введите email и пароль" });
-    }
-
-    const { data, error } = await server.auth.auth.signInWithPassword({ email, password });
-    const token = data.session?.access_token;
-    const user = data.user;
-    if (error || !token || !user) {
-      return reply.status(401).send({ error: "Не авторизован" });
-    }
-
-    const { data: roleRow, error: roleError } = await server.db
-      .from("user_roles")
-      .select("role")
-      .eq("user_id", user.id)
-      .maybeSingle<{ role: string }>();
-    if (roleError) {
-      return reply.status(500).send({ error: roleError.message });
-    }
-    if (roleRow?.role !== "super_admin") {
-      return reply.status(403).send({ error: "Доступ только для super_admin" });
-    }
-
-    return {
-      access_token: token,
-      user: {
-        id: user.id,
-        email: user.email || email,
-        role: roleRow.role,
-      },
-    };
-  });
 }
 
 function renderBrokerPage() {
-  const dealWorkerBaseUrl = JSON.stringify(getOptionalEnv("DEAL_WORKER_BASE_URL", "http://localhost:3000"));
-
   return `<!doctype html>
 <html lang="ru">
   <head>
@@ -287,16 +243,25 @@ function renderBrokerPage() {
         box-shadow: 0 0 0 3px rgba(23,107,77,0.12);
       }
       .campaign-card.plan-ok {
-        border-color: rgba(23,107,77,0.22);
-        background: rgba(23,107,77,0.08);
+        border-color: rgba(23,107,77,0.5);
+        background:
+          linear-gradient(135deg, rgba(23,107,77,0.16), rgba(23,107,77,0.08)),
+          var(--card);
+        box-shadow: inset 4px 0 0 rgba(23,107,77,0.78);
       }
       .campaign-card.plan-behind {
-        border-color: rgba(206,120,149,0.26);
-        background: rgba(206,120,149,0.12);
+        border-color: rgba(206,120,149,0.52);
+        background:
+          linear-gradient(135deg, rgba(206,120,149,0.18), rgba(206,120,149,0.08)),
+          var(--card);
+        box-shadow: inset 4px 0 0 rgba(206,120,149,0.82);
       }
       .campaign-card.plan-empty {
-        border-color: rgba(219,168,74,0.32);
-        background: rgba(219,168,74,0.12);
+        border-color: rgba(219,168,74,0.56);
+        background:
+          linear-gradient(135deg, rgba(219,168,74,0.2), rgba(219,168,74,0.08)),
+          var(--card);
+        box-shadow: inset 4px 0 0 rgba(219,168,74,0.82);
       }
       .badge {
         display: inline-flex;
@@ -518,7 +483,7 @@ function renderBrokerPage() {
         </div>
         <div class="actions">
           <button class="btn" id="refreshBtn">Обновить</button>
-          <span class="badge" id="authBadge">Проверяем доступ</span>
+          <span class="badge" id="authBadge">Локальный режим</span>
         </div>
       </div>
     </header>
@@ -535,35 +500,9 @@ function renderBrokerPage() {
           </div>
         </div>
         <div class="panel">
-          <h2>Доступ</h2>
-          <div class="access-form">
-            <input id="loginEmailInput" type="email" autocomplete="username" placeholder="Email" />
-            <input id="loginPasswordInput" type="password" autocomplete="current-password" placeholder="Пароль" />
-            <button class="btn primary" id="brokerLoginBtn">Войти</button>
-          </div>
-          <div class="access-divider"></div>
-          <div class="row">
-            <input id="platformTokenInput" placeholder="platform_token" />
-            <button class="btn" id="savePlatformTokenBtn">Token</button>
-          </div>
-          <button class="btn danger" id="clearPlatformTokenBtn">Сбросить token</button>
+          <h2>Режим работы</h2>
+          <div class="small">Локальный режим. Вход сейчас не требуется, все действия выполняются сразу в рабочем контуре.</div>
           <div class="message" id="globalMsg"></div>
-          <div class="access-divider"></div>
-          <h3>amoCRM</h3>
-          <div class="access-form">
-            <input id="amoBaseUrlInput" placeholder="https://example.amocrm.ru" />
-            <input id="amoAccessTokenInput" type="password" placeholder="Access token" />
-            <div class="row">
-              <input id="amoPipelineIdInput" type="number" min="1" step="1" placeholder="Pipeline ID" />
-              <input id="amoStatusIdInput" type="number" min="1" step="1" placeholder="Status ID" />
-            </div>
-            <input id="amoResponsibleUserIdInput" type="number" min="1" step="1" placeholder="Responsible user ID (optional)" />
-            <div class="row">
-              <button class="btn" id="saveAmoConfigBtn">Сохранить amo</button>
-              <button class="btn primary" id="testAmoConnectionBtn">Проверить</button>
-            </div>
-          </div>
-          <div class="message" id="amoConnectionMsg"></div>
         </div>
       </section>
 
@@ -588,6 +527,7 @@ function renderBrokerPage() {
             </div>
             <div class="row">
               <button class="btn primary" id="saveCompanyDraftBtn">Сохранить</button>
+              <button class="btn" id="generateCopyBtn">Сгенерировать письмо</button>
               <button class="btn" id="toggleCompanyStatusBtn">Активно</button>
               <button class="btn danger" id="stopCompanyBtn">Стоп</button>
             </div>
@@ -598,7 +538,6 @@ function renderBrokerPage() {
             <span class="badge" id="activeCompanyFollowUpBadge">follow-up: 0</span>
             <span class="badge" id="activeCompanyRepliesBadge">ответы: 0</span>
             <span class="badge" id="activeCompanyRecipientsBadge">получатели: 0</span>
-            <span class="badge" id="activeCompanyAmoExportsBadge">amo: 0</span>
             <span class="badge" id="activeCompanyStatusBadge">draft</span>
           </div>
           <div class="row">
@@ -613,9 +552,6 @@ function renderBrokerPage() {
               alt=""
               style="width:100%; max-height:360px; object-fit:cover; border-radius:18px; border:1px solid var(--line); background:rgba(255,255,255,0.72);"
             />
-          </div>
-          <div class="row">
-            <button class="btn primary" id="exportAmoRepliesBtn">Экспортировать ответы в amoCRM</button>
           </div>
           <div class="plan-summary-grid">
             <div class="plan-summary-card">
@@ -723,10 +659,31 @@ function renderBrokerPage() {
             <textarea id="companyLetterBodyInput" placeholder="Основное письмо"></textarea>
           </div>
           <div class="stack">
-            <h2>Пинги</h2>
+            <div class="row">
+              <h2>Пинги</h2>
+              <button class="btn" id="generateFollowupsBtn">Сгенерировать follow-up</button>
+            </div>
             <textarea id="companyPingOneInput" placeholder="Пинг 1"></textarea>
             <textarea id="companyPingTwoInput" placeholder="Пинг 2"></textarea>
             <textarea id="companyPingThreeInput" placeholder="Пинг 3"></textarea>
+          </div>
+          <div class="stack">
+            <div class="row">
+              <div>
+                <h2>Расписание запусков</h2>
+                <div class="small">Месячный pipeline в формате: <code>YYYY-MM-DD | assets/sales_campaigns/.../manifest.csv | комментарий</code>.</div>
+              </div>
+              <div class="row">
+                <button class="btn" id="generateTodayPipelineBtn">Собрать today pipeline</button>
+                <button class="btn" id="saveExecutionConfigBtn">Сохранить расписание</button>
+                <button class="btn primary" id="launchTodayBtn">Запустить сегодня</button>
+              </div>
+            </div>
+            <input id="executionMonthLabelInput" placeholder="Месяц / wave label, например May 2026" />
+            <textarea id="executionScheduleInput" placeholder="2026-05-09 | assets/sales_campaigns/.../manifest.csv | day 1&#10;2026-05-10 | assets/sales_campaigns/.../manifest.csv | day 2"></textarea>
+            <div class="small" id="executionStatusMeta">Расписание пока не задано.</div>
+            <div id="executionPreviewList" class="stack"></div>
+            <div id="executionRunsList" class="stack"></div>
           </div>
         </section>
 
@@ -758,18 +715,8 @@ function renderBrokerPage() {
     </main>
 
     <script>
-      const DEAL_WORKER_BASE_URL = ${dealWorkerBaseUrl};
       const OBJECT_ROUTE_PREFIX = "/broker/object/";
       const state = {
-        token: localStorage.getItem("platform_token") || "",
-        amoConfig: {
-          baseUrl: localStorage.getItem("amo_base_url") || "",
-          accessToken: localStorage.getItem("amo_access_token") || "",
-          pipelineId: localStorage.getItem("amo_pipeline_id") || "",
-          statusId: localStorage.getItem("amo_status_id") || "",
-          responsibleUserId: localStorage.getItem("amo_responsible_user_id") || "",
-        },
-        me: null,
         campaigns: [],
         campaignPlaybooks: {},
         campaignsTotal: 0,
@@ -781,53 +728,21 @@ function renderBrokerPage() {
         activeCompanyRecipientsPage: 1,
         expandedRecipientCompanies: {},
         selectedCampaignPlaybook: null,
+        selectedCampaignExecution: null,
         generatingHypotheses: false,
-        amoTesting: false,
-        amoExporting: false,
+        generatingCopy: false,
+        generatingFollowups: false,
+        generatingTodayPipeline: false,
+        savingExecution: false,
+        launchingExecution: false,
       };
 
       const $ = (id) => document.getElementById(id);
-
-      const tokenFromUrl = new URLSearchParams(window.location.search).get("platform_token");
-      if (tokenFromUrl) {
-        localStorage.setItem("platform_token", tokenFromUrl);
-        state.token = tokenFromUrl;
-        history.replaceState({}, "", window.location.pathname);
-      }
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => (
           { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
         ));
-      }
-
-      function amoConfigFromInputs() {
-        return {
-          baseUrl: $("amoBaseUrlInput").value.trim(),
-          accessToken: $("amoAccessTokenInput").value.trim(),
-          pipelineId: $("amoPipelineIdInput").value.trim(),
-          statusId: $("amoStatusIdInput").value.trim(),
-          responsibleUserId: $("amoResponsibleUserIdInput").value.trim(),
-        };
-      }
-
-      function persistAmoConfig(config) {
-        state.amoConfig = Object.assign({}, config);
-        localStorage.setItem("amo_base_url", state.amoConfig.baseUrl || "");
-        localStorage.setItem("amo_access_token", state.amoConfig.accessToken || "");
-        localStorage.setItem("amo_pipeline_id", state.amoConfig.pipelineId || "");
-        localStorage.setItem("amo_status_id", state.amoConfig.statusId || "");
-        localStorage.setItem("amo_responsible_user_id", state.amoConfig.responsibleUserId || "");
-      }
-
-      function amoConfigPayload() {
-        return {
-          baseUrl: state.amoConfig.baseUrl,
-          accessToken: state.amoConfig.accessToken,
-          pipelineId: state.amoConfig.pipelineId,
-          statusId: state.amoConfig.statusId,
-          responsibleUserId: state.amoConfig.responsibleUserId,
-        };
       }
 
       function propertyIdFromPath() {
@@ -840,17 +755,10 @@ function renderBrokerPage() {
       }
 
       async function apiFetch(url, options = {}) {
-        const headers = Object.assign({}, options.headers || {});
-        if (state.token) headers.Authorization = "Bearer " + state.token;
-        const response = await fetch(url, Object.assign({}, options, { headers }));
+        const response = await fetch(url, Object.assign({}, options, { headers: Object.assign({}, options.headers || {}) }));
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || ("Код " + response.status));
         return payload;
-      }
-
-      async function loadMe() {
-        state.me = await apiFetch("/broker/me");
-        $("authBadge").textContent = state.me?.email || "super_admin";
       }
 
       async function loadCampaigns() {
@@ -873,11 +781,14 @@ function renderBrokerPage() {
       }
 
       async function loadDashboardSummary() {
-        const [allCampaigns, directorySummary, outreachSummary] = await Promise.all([
+        const [allCampaignsResult, directorySummaryResult, outreachSummaryResult] = await Promise.allSettled([
           apiFetch("/broker/campaigns?limit=100"),
           apiFetch("/broker/company-directory?limit=1"),
           apiFetch("/broker/outreach/companies?limit=1"),
         ]);
+        const allCampaigns = allCampaignsResult.status === "fulfilled" ? allCampaignsResult.value : { items: [] };
+        const directorySummary = directorySummaryResult.status === "fulfilled" ? directorySummaryResult.value : { total: 0 };
+        const outreachSummary = outreachSummaryResult.status === "fulfilled" ? outreachSummaryResult.value : { total: 0 };
         const allCampaignItems = Array.isArray(allCampaigns.items) ? allCampaigns.items : [];
         state.sentEmailsTotal = allCampaignItems.reduce((sum, campaign) => {
           const stats = campaign?.stats || {};
@@ -931,54 +842,21 @@ function renderBrokerPage() {
       async function refreshAll() {
         $("globalMsg").textContent = "Загружаем Deal Flow...";
         try {
-          await loadMe();
           await Promise.all([loadCampaigns(), loadDashboardSummary()]);
           await syncSelectionFromPath();
           if (state.selectedCampaignId) {
-            await loadSelectedCampaign();
-            await loadSelectedCampaignPlaybook();
+            await Promise.all([
+              loadSelectedCampaign(),
+              loadSelectedCampaignPlaybook(),
+              loadSelectedCampaignExecution(),
+            ]);
           }
           renderAll();
           $("globalMsg").textContent = "Готово.";
         } catch (err) {
-          if (/Не авторизован|Доступ только/.test(err.message || "")) {
-            $("authBadge").textContent = "Требуется вход";
-            state.me = null;
-            state.campaigns = [];
-            state.campaignPlaybooks = {};
-            state.campaignsTotal = 0;
-            state.companyDirectoryTotal = 0;
-            state.contactedCompaniesTotal = 0;
-            state.sentEmailsTotal = 0;
-            state.selectedCampaign = null;
-            state.selectedCampaignPlaybook = null;
-          }
           $("globalMsg").textContent = "Ошибка: " + err.message;
           renderAll();
         }
-      }
-
-      async function loginBroker() {
-        const email = $("loginEmailInput").value.trim();
-        const password = $("loginPasswordInput").value;
-        if (!email || !password) {
-          $("globalMsg").textContent = "Введите email и пароль.";
-          return;
-        }
-        $("globalMsg").textContent = "Проверяем доступ...";
-        const payload = await fetch("/broker/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-        }).then(async (response) => {
-          const data = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(data.error || ("Код " + response.status));
-          return data;
-        });
-        state.token = payload.access_token || "";
-        localStorage.setItem("platform_token", state.token);
-        $("loginPasswordInput").value = "";
-        await refreshAll();
       }
 
       function renderCompanyDirectory() {
@@ -1001,6 +879,7 @@ function renderBrokerPage() {
               '<article class="campaign-card ' + planState.cardClass + (isActive ? ' active' : '') + '" data-active-campaign-id="' + escapeHtml(campaign.id || "") + '">' +
                 '<strong>' + escapeHtml(title) + '</strong>' +
                 '<div class="row" style="margin-top:8px;">' +
+                  '<span class="' + escapeHtml(planState.badgeClass) + '">' + escapeHtml(planState.label) + '</span>' +
                   '<span class="badge">первые: ' + escapeHtml(stats.firstTouchCount || 0) + '</span>' +
                   '<span class="badge">follow-up: ' + escapeHtml(stats.followUpCount || 0) + '</span>' +
                   '<span class="badge">получатели: ' + escapeHtml(stats.recipientCount || 0) + '</span>' +
@@ -1213,6 +1092,36 @@ function renderBrokerPage() {
         state.selectedCampaignPlaybook = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaignId) + "/playbook");
       }
 
+      async function loadSelectedCampaignExecution() {
+        if (!state.selectedCampaignId) {
+          state.selectedCampaignExecution = null;
+          return;
+        }
+        state.selectedCampaignExecution = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaignId) + "/execution");
+      }
+
+      function executionScheduleToText(execution) {
+        const rows = Array.isArray(execution?.schedules) ? execution.schedules : [];
+        return rows.map((item) =>
+          [item.date || "", item.manifestPath || "", item.label || ""].filter(Boolean).join(" | ")
+        ).join("\\n");
+      }
+
+      function parseExecutionScheduleInput() {
+        return $("executionScheduleInput").value
+          .split("\\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const parts = line.split("|").map((item) => item.trim());
+            return {
+              date: parts[0] || "",
+              manifestPath: parts[1] || "",
+              label: parts.slice(2).join(" | ") || "",
+            };
+          });
+      }
+
       function renderActiveCompanyDetail() {
         const campaign = state.selectedCampaign;
         const pageSize = 10;
@@ -1227,9 +1136,12 @@ function renderBrokerPage() {
           $("activeCompanyFollowUpBadge").textContent = "follow-up: 0";
           $("activeCompanyRepliesBadge").textContent = "ответы: 0";
           $("activeCompanyRecipientsBadge").textContent = "получатели: 0";
-          $("activeCompanyAmoExportsBadge").textContent = "amo: 0";
           $("activeCompanyStatusBadge").textContent = "Неактивно";
           $("activeCompanyStatusBadge").className = objectStatusClass("draft");
+          $("generateCopyBtn").disabled = false;
+          $("generateCopyBtn").textContent = "Сгенерировать письмо";
+          $("generateFollowupsBtn").disabled = false;
+          $("generateFollowupsBtn").textContent = "Сгенерировать follow-up";
           renderPropertyBadges(null);
           renderPropertyImage(null);
           $("companyLetterSubjectInput").value = "";
@@ -1237,6 +1149,17 @@ function renderBrokerPage() {
           $("companyPingOneInput").value = "";
           $("companyPingTwoInput").value = "";
           $("companyPingThreeInput").value = "";
+          $("executionMonthLabelInput").value = "";
+          $("executionScheduleInput").value = "";
+          $("executionStatusMeta").textContent = "Расписание пока не задано.";
+          $("executionPreviewList").innerHTML = '<div class="small">Preview очереди появится после генерации.</div>';
+          $("executionRunsList").innerHTML = '<div class="small">Запуски появятся после выбора объекта.</div>';
+          $("generateTodayPipelineBtn").disabled = false;
+          $("generateTodayPipelineBtn").textContent = "Собрать today pipeline";
+          $("saveExecutionConfigBtn").disabled = false;
+          $("saveExecutionConfigBtn").textContent = "Сохранить расписание";
+          $("launchTodayBtn").disabled = true;
+          $("launchTodayBtn").textContent = "Запустить сегодня";
           $("monthlyFirstTouchTargetInput").value = "0";
           $("monthlyFollowUpTargetInput").value = "0";
           $("monthlyUniqueCompaniesTargetInput").value = "0";
@@ -1259,8 +1182,6 @@ function renderBrokerPage() {
           $("activeCompanyPageBadge").textContent = "1 / 1";
           $("activeCompanyPrevPageBtn").disabled = true;
           $("activeCompanyNextPageBtn").disabled = true;
-          $("exportAmoRepliesBtn").disabled = true;
-          $("exportAmoRepliesBtn").textContent = "Экспортировать ответы в amoCRM";
           renderCompanyStatusControls("draft");
           return;
         }
@@ -1268,7 +1189,7 @@ function renderBrokerPage() {
         const draft = companyDraft(campaign);
         const stats = campaign.stats || {};
         const property = campaign.property || null;
-        const amoExportStats = campaign.amoExportStats || {};
+        const execution = state.selectedCampaignExecution || { monthLabel: null, schedules: [], lastRun: null, runs: [] };
         const targetCompanies = Array.isArray(campaign.targetCompanies) ? campaign.targetCompanies : [];
         const hypotheses = Array.isArray(campaign.hypotheses) ? campaign.hypotheses : [];
         const totalPages = Math.max(1, Math.ceil(targetCompanies.length / pageSize));
@@ -1282,9 +1203,12 @@ function renderBrokerPage() {
         $("activeCompanyFollowUpBadge").textContent = "follow-up: " + (stats.followUpCount || 0);
         $("activeCompanyRepliesBadge").textContent = "ответы: " + (stats.repliedCount || 0);
         $("activeCompanyRecipientsBadge").textContent = "получатели: " + (stats.recipientCount || 0);
-        $("activeCompanyAmoExportsBadge").textContent = "amo: " + (amoExportStats.exportedCount || 0);
         $("activeCompanyStatusBadge").textContent = objectStatusLabel(draft.status || "draft");
         $("activeCompanyStatusBadge").className = objectStatusClass(draft.status || "draft");
+        $("generateCopyBtn").disabled = state.generatingCopy;
+        $("generateCopyBtn").textContent = state.generatingCopy ? "Генерируем..." : "Сгенерировать письмо";
+        $("generateFollowupsBtn").disabled = state.generatingFollowups;
+        $("generateFollowupsBtn").textContent = state.generatingFollowups ? "Генерируем..." : "Сгенерировать follow-up";
         renderPropertyBadges(property);
         renderPropertyImage(property);
         $("companyLetterSubjectInput").value = draft.subject || "";
@@ -1292,6 +1216,49 @@ function renderBrokerPage() {
         $("companyPingOneInput").value = draft.pingOne || "";
         $("companyPingTwoInput").value = draft.pingTwo || "";
         $("companyPingThreeInput").value = draft.pingThree || "";
+        $("executionMonthLabelInput").value = execution.monthLabel || "";
+        $("executionScheduleInput").value = executionScheduleToText(execution);
+        $("generateTodayPipelineBtn").disabled = state.generatingTodayPipeline;
+        $("generateTodayPipelineBtn").textContent = state.generatingTodayPipeline ? "Собираем..." : "Собрать today pipeline";
+        $("saveExecutionConfigBtn").disabled = state.savingExecution;
+        $("saveExecutionConfigBtn").textContent = state.savingExecution ? "Сохраняем..." : "Сохранить расписание";
+        const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Moscow" });
+        const hasTodaySchedule = (execution.schedules || []).some((item) => item.date === today);
+        const isRunActive = execution.lastRun?.status === "running";
+        $("launchTodayBtn").disabled = state.launchingExecution || isRunActive || !hasTodaySchedule;
+        $("launchTodayBtn").textContent = state.launchingExecution
+          ? "Запускаем..."
+          : (isRunActive ? "Отправка идет" : "Запустить сегодня");
+        $("executionStatusMeta").textContent = execution.schedules?.length
+          ? "В расписании " + execution.schedules.length + " day manifest(s)." + (execution.monthLabel ? " " + execution.monthLabel + "." : "")
+          : "Расписание пока не задано.";
+        $("executionPreviewList").innerHTML = execution.generatedPreview?.items?.length
+          ? '<article class="activity-row">' +
+              '<strong>Today preview · ' + escapeHtml(execution.generatedPreview.total || 0) + ' recipients</strong>' +
+              '<div class="small" style="margin-top:6px;">Manifest: ' + escapeHtml(execution.generatedPreview.manifestPath || "") + '</div>' +
+              '<div class="small" style="margin-top:10px;">' +
+                execution.generatedPreview.items.map((item) =>
+                  escapeHtml((item.companyName || "") + " · " + (item.email || "") + " · " + (item.matchedSegment || "") + " · score " + (item.score || 0))
+                ).join("<br>")
+              + '</div>' +
+            '</article>'
+          : '<div class="small">Preview очереди появится после генерации.</div>';
+        $("executionRunsList").innerHTML = (execution.runs || []).length
+          ? execution.runs.map((run) =>
+            '<article class="activity-row">' +
+              '<div class="row" style="align-items:flex-start;">' +
+                '<div style="flex:1;">' +
+                  '<strong>' + escapeHtml(run.label || run.date || "Run") + '</strong>' +
+                  '<div class="small" style="margin-top:6px;">' + escapeHtml(run.manifestPath || "") + '</div>' +
+                '</div>' +
+                '<span class="badge">' + escapeHtml(run.status || "idle") + '</span>' +
+              '</div>' +
+              '<div class="small" style="margin-top:8px;">Старт: ' + escapeHtml(run.startedAt || "—") + (run.completedAt ? ' · Завершение: ' + escapeHtml(run.completedAt) : '') + '</div>' +
+              (run.error ? '<div class="small" style="margin-top:6px; color:var(--danger);">' + escapeHtml(run.error) + '</div>' : '') +
+              (run.output ? '<pre style="margin-top:8px; white-space:pre-wrap; font-size:12px; color:var(--muted);">' + escapeHtml(run.output) + '</pre>' : '') +
+            '</article>'
+          ).join("")
+          : '<div class="small">История запусков пока пустая.</div>';
         $("monthlyFirstTouchTargetInput").value = String(draft.monthlyPlan.firstTouchTarget || 0);
         $("monthlyFollowUpTargetInput").value = String(draft.monthlyPlan.followUpTarget || 0);
         $("monthlyUniqueCompaniesTargetInput").value = String(draft.monthlyPlan.uniqueCompaniesTarget || 0);
@@ -1308,8 +1275,6 @@ function renderBrokerPage() {
         setPlanFact("weekly", draft.weeklyProgress);
         setPlanFact("daily", draft.dailyProgress);
         renderCompanyStatusControls(draft.status || "draft");
-        $("exportAmoRepliesBtn").disabled = state.amoExporting || !(stats.repliedCount > 0);
-        $("exportAmoRepliesBtn").textContent = state.amoExporting ? "Экспортируем..." : "Экспортировать ответы в amoCRM";
         $("generateHypothesesBtn").disabled = state.generatingHypotheses;
         $("generateHypothesesBtn").textContent = state.generatingHypotheses ? "Генерируем..." : "Сгенерировать гипотезы";
         $("activeCompanyHypothesesList").innerHTML = hypotheses.length
@@ -1341,7 +1306,6 @@ function renderBrokerPage() {
                 '<div class="small recipient-company-metric"><span class="muted">Первые</span><br><strong>' + escapeHtml(company.firstTouchCount || 0) + '</strong></div>' +
                 '<div class="small recipient-company-metric"><span class="muted">Follow-up</span><br><strong>' + escapeHtml(company.followUpCount || 0) + '</strong></div>' +
                 '<div class="small recipient-company-metric"><span class="muted">Ответы</span><br><strong>' + escapeHtml(company.repliedCount || 0) + '</strong></div>' +
-                '<div class="small recipient-company-metric"><span class="muted">amo</span><br><strong>' + escapeHtml(company.amoExportStatus || "—") + '</strong></div>' +
                 '<button class="btn recipient-toggle" data-toggle-recipient-company="' + escapeHtml(recipientCompanyKey(company)) + '">' + (expanded ? '▾' : '▸') + '</button>' +
               '</div>' +
               (expanded
@@ -1358,17 +1322,6 @@ function renderBrokerPage() {
       }
 
       function renderAll() {
-        $("platformTokenInput").value = state.token ? "token сохранен" : "";
-        $("amoBaseUrlInput").value = state.amoConfig.baseUrl || "";
-        $("amoAccessTokenInput").value = state.amoConfig.accessToken || "";
-        $("amoPipelineIdInput").value = state.amoConfig.pipelineId || "";
-        $("amoStatusIdInput").value = state.amoConfig.statusId || "";
-        $("amoResponsibleUserIdInput").value = state.amoConfig.responsibleUserId || "";
-        $("testAmoConnectionBtn").disabled = state.amoTesting;
-        $("testAmoConnectionBtn").textContent = state.amoTesting ? "Проверяем..." : "Проверить";
-        $("loginEmailInput").classList.toggle("hidden", Boolean(state.token && state.me));
-        $("loginPasswordInput").classList.toggle("hidden", Boolean(state.token && state.me));
-        $("brokerLoginBtn").classList.toggle("hidden", Boolean(state.token && state.me));
         renderCompanyDirectory();
         renderActiveCompanyDetail();
       }
@@ -1435,94 +1388,130 @@ function renderBrokerPage() {
         }
       }
 
-      async function testAmoConnection() {
-        persistAmoConfig(amoConfigFromInputs());
-        state.amoTesting = true;
-        $("amoConnectionMsg").textContent = "Проверяем amoCRM...";
-        renderAll();
+      async function generateCopy() {
+        const campaign = state.selectedCampaign;
+        if (!campaign) {
+          $("globalMsg").textContent = "Сначала выберите объект.";
+          return;
+        }
+        state.generatingCopy = true;
+        renderActiveCompanyDetail();
         try {
-          const payload = await apiFetch("/broker/amo/test", {
+          state.selectedCampaignPlaybook = await apiFetch("/broker/campaigns/" + encodeURIComponent(campaign.id) + "/playbook/generate-copy", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(amoConfigPayload()),
           });
-          $("amoConnectionMsg").textContent = "Подключено: " + (payload.account?.name || payload.account?.subdomain || "amoCRM");
+          state.campaignPlaybooks[campaign.id] = state.selectedCampaignPlaybook;
+          $("globalMsg").textContent = "Письмо и пинги сгенерированы.";
+          renderActiveCompanyDetail();
         } catch (err) {
-          $("amoConnectionMsg").textContent = "Ошибка amoCRM: " + err.message;
+          $("globalMsg").textContent = "Ошибка генерации письма: " + err.message;
         } finally {
-          state.amoTesting = false;
-          renderAll();
+          state.generatingCopy = false;
+          renderActiveCompanyDetail();
         }
       }
 
-      async function exportRepliesToAmo() {
+      async function generateFollowups() {
+        const campaign = state.selectedCampaign;
+        if (!campaign) {
+          $("globalMsg").textContent = "Сначала выберите объект.";
+          return;
+        }
+        state.generatingFollowups = true;
+        renderActiveCompanyDetail();
+        try {
+          state.selectedCampaignPlaybook = await apiFetch("/broker/campaigns/" + encodeURIComponent(campaign.id) + "/playbook/generate-followups", {
+            method: "POST",
+          });
+          state.campaignPlaybooks[campaign.id] = state.selectedCampaignPlaybook;
+          $("globalMsg").textContent = "Follow-up пинги сгенерированы.";
+          renderActiveCompanyDetail();
+        } catch (err) {
+          $("globalMsg").textContent = "Ошибка генерации follow-up: " + err.message;
+        } finally {
+          state.generatingFollowups = false;
+          renderActiveCompanyDetail();
+        }
+      }
+
+      async function saveExecutionConfig() {
         if (!state.selectedCampaign) {
           $("globalMsg").textContent = "Сначала выберите объект.";
           return;
         }
-        persistAmoConfig(amoConfigFromInputs());
-        state.amoExporting = true;
+        state.savingExecution = true;
         renderActiveCompanyDetail();
         try {
-          const payload = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaign.id) + "/amo/export-replied", {
-            method: "POST",
+          state.selectedCampaignExecution = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaign.id) + "/execution", {
+            method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(amoConfigPayload()),
+            body: JSON.stringify({
+              monthLabel: $("executionMonthLabelInput").value.trim(),
+              schedules: parseExecutionScheduleInput(),
+            }),
           });
-          await loadSelectedCampaign();
-          const summary = payload.summary || {};
-          $("globalMsg").textContent = "amoCRM: экспортировано " + (summary.exportedCount || 0)
-            + ", локально пропущено " + (summary.skippedLocalCount || 0)
-            + ", найдено дублей " + (summary.skippedExistingCount || 0)
-            + ", ошибок " + (summary.failedCount || 0) + ".";
-          renderAll();
+          $("globalMsg").textContent = "Расписание запусков сохранено.";
+          renderActiveCompanyDetail();
         } catch (err) {
-          $("globalMsg").textContent = "Ошибка экспорта amoCRM: " + err.message;
+          $("globalMsg").textContent = "Ошибка сохранения расписания: " + err.message;
         } finally {
-          state.amoExporting = false;
+          state.savingExecution = false;
+          renderActiveCompanyDetail();
+        }
+      }
+
+      async function launchTodayExecution() {
+        if (!state.selectedCampaign) {
+          $("globalMsg").textContent = "Сначала выберите объект.";
+          return;
+        }
+        state.launchingExecution = true;
+        renderActiveCompanyDetail();
+        try {
+          const payload = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaign.id) + "/execution/launch-today", {
+            method: "POST",
+          });
+          state.selectedCampaignExecution = payload.state || state.selectedCampaignExecution;
+          $("globalMsg").textContent = "Запуск отправки поставлен в очередь.";
+          renderActiveCompanyDetail();
+        } catch (err) {
+          $("globalMsg").textContent = "Ошибка запуска: " + err.message;
+        } finally {
+          state.launchingExecution = false;
+          renderActiveCompanyDetail();
+        }
+      }
+
+      async function generateTodayPipeline() {
+        if (!state.selectedCampaign) {
+          $("globalMsg").textContent = "Сначала выберите объект.";
+          return;
+        }
+        state.generatingTodayPipeline = true;
+        renderActiveCompanyDetail();
+        try {
+          const payload = await apiFetch("/broker/campaigns/" + encodeURIComponent(state.selectedCampaign.id) + "/pipeline/generate-today", {
+            method: "POST",
+          });
+          state.selectedCampaignExecution = payload.state || state.selectedCampaignExecution;
+          $("globalMsg").textContent = "Today pipeline собран и добавлен в расписание.";
+          renderActiveCompanyDetail();
+        } catch (err) {
+          $("globalMsg").textContent = "Ошибка генерации очереди: " + err.message;
+        } finally {
+          state.generatingTodayPipeline = false;
           renderActiveCompanyDetail();
         }
       }
 
       function bindEvents() {
         $("refreshBtn").addEventListener("click", refreshAll);
-        $("savePlatformTokenBtn").addEventListener("click", () => {
-          const token = $("platformTokenInput").value.trim();
-          if (!token || token === "token сохранен") return;
-          localStorage.setItem("platform_token", token);
-          state.token = token;
-          refreshAll();
-        });
-        $("clearPlatformTokenBtn").addEventListener("click", () => {
-          localStorage.removeItem("platform_token");
-          state.token = "";
-          state.me = null;
-          state.campaigns = [];
-          state.campaignPlaybooks = {};
-          state.campaignsTotal = 0;
-          state.companyDirectoryTotal = 0;
-          state.contactedCompaniesTotal = 0;
-          state.sentEmailsTotal = 0;
-          state.selectedCampaignId = "";
-          state.selectedCampaign = null;
-          state.selectedCampaignPlaybook = null;
-          renderAll();
-          $("globalMsg").textContent = "Token сброшен.";
-        });
-        $("saveAmoConfigBtn").addEventListener("click", () => {
-          persistAmoConfig(amoConfigFromInputs());
-          $("amoConnectionMsg").textContent = "Настройки amoCRM сохранены локально.";
-          renderAll();
-        });
-        $("testAmoConnectionBtn").addEventListener("click", () => testAmoConnection());
-        $("brokerLoginBtn").addEventListener("click", () => loginBroker().catch((err) => $("globalMsg").textContent = "Ошибка авторизации: " + err.message));
-        $("loginPasswordInput").addEventListener("keydown", (event) => {
-          if (event.key === "Enter") {
-            loginBroker().catch((err) => $("globalMsg").textContent = "Ошибка авторизации: " + err.message);
-          }
-        });
         $("saveCompanyDraftBtn").addEventListener("click", () => saveActiveCompanyDraft());
-        $("exportAmoRepliesBtn").addEventListener("click", () => exportRepliesToAmo());
+        $("generateCopyBtn").addEventListener("click", () => generateCopy());
+        $("generateFollowupsBtn").addEventListener("click", () => generateFollowups());
+        $("generateTodayPipelineBtn").addEventListener("click", () => generateTodayPipeline());
+        $("saveExecutionConfigBtn").addEventListener("click", () => saveExecutionConfig());
+        $("launchTodayBtn").addEventListener("click", () => launchTodayExecution());
         $("generateHypothesesBtn").addEventListener("click", () => generateHypotheses());
         $("toggleCompanyStatusBtn").addEventListener("click", () => {
           const campaign = state.selectedCampaign;
@@ -1536,6 +1525,7 @@ function renderBrokerPage() {
           state.selectedCampaignId = "";
           state.selectedCampaign = null;
           state.selectedCampaignPlaybook = null;
+          state.selectedCampaignExecution = null;
           state.activeCompanyRecipientsPage = 1;
           state.expandedRecipientCompanies = {};
           history.pushState({}, "", "/broker");
@@ -1560,7 +1550,7 @@ function renderBrokerPage() {
             const campaign = state.campaigns.find((item) => item.id === state.selectedCampaignId);
             history.pushState({}, "", objectUrl(campaign?.property_id || campaign?.property?.id || ""));
             loadSelectedCampaign()
-              .then(() => loadSelectedCampaignPlaybook())
+              .then(() => Promise.all([loadSelectedCampaignPlaybook(), loadSelectedCampaignExecution()]))
               .then(renderAll)
               .catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
             return;
@@ -1575,7 +1565,7 @@ function renderBrokerPage() {
         });
         window.addEventListener("popstate", () => {
           syncSelectionFromPath()
-            .then(() => state.selectedCampaignId ? loadSelectedCampaign().then(() => loadSelectedCampaignPlaybook()) : Promise.resolve())
+            .then(() => state.selectedCampaignId ? loadSelectedCampaign().then(() => Promise.all([loadSelectedCampaignPlaybook(), loadSelectedCampaignExecution()])) : Promise.resolve())
             .then(renderAll)
             .catch((err) => $("globalMsg").textContent = "Ошибка: " + err.message);
         });

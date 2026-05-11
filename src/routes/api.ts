@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
 import type { FastifyInstance } from "fastify";
 import { getAuthContext, requireSuperAdmin } from "../auth.js";
 import { getAmoCrmClient, normalizeAmoCrmConfig } from "../amocrm.js";
@@ -109,6 +112,17 @@ type CompanyPlaybookBody = {
   monthlyPlan?: Record<string, unknown>;
   weeklyPlan?: Record<string, unknown>;
   dailyPlan?: Record<string, unknown>;
+};
+
+type ExecutionScheduleRow = {
+  date: string;
+  manifestPath: string;
+  label?: string;
+};
+
+type CampaignExecutionBody = {
+  monthLabel?: string;
+  schedules?: ExecutionScheduleRow[];
 };
 
 type AmoCrmBody = {
@@ -244,6 +258,53 @@ const PLAYBOOK_PLAN_SELECT = `${PLAYBOOK_BASE_SELECT},monthly_plan,weekly_plan,d
 const PLAYBOOK_PLAN_MARKER_PREFIX = "\n<!--broker_plan:";
 const PLAYBOOK_PLAN_MARKER_SUFFIX = "-->";
 const QUALIFIED_REPLY_EXPORT_TYPE = "qualified_reply_lead";
+const MOSCOW_TIMEZONE = "Europe/Moscow";
+const DEAL_WORKER_ROOT = path.resolve(process.cwd(), "..", "deal_worker");
+const EXECUTION_STATE_DIR = path.resolve(process.cwd(), "data");
+const EXECUTION_STATE_PATH = path.join(EXECUTION_STATE_DIR, "campaign_execution_state.json");
+
+type ExecutionRunStatus = "idle" | "running" | "completed" | "failed";
+
+type CampaignExecutionRun = {
+  id: string;
+  date: string | null;
+  manifestPath: string;
+  label: string | null;
+  status: ExecutionRunStatus;
+  startedAt: string;
+  completedAt: string | null;
+  output: string;
+  error: string | null;
+};
+
+type CampaignExecutionState = {
+  monthLabel: string | null;
+  schedules: ExecutionScheduleRow[];
+  lastRun: CampaignExecutionRun | null;
+  runs: CampaignExecutionRun[];
+  generatedPreview?: CampaignGeneratedPreview | null;
+};
+
+const activeExecutionRuns = new Map<string, CampaignExecutionRun>();
+
+type GeneratedPipelineItem = {
+  companyName: string;
+  email: string;
+  city: string | null;
+  region: string | null;
+  rubric: string | null;
+  subrubric: string | null;
+  score: number;
+  matchedSegment: string;
+};
+
+type CampaignGeneratedPreview = {
+  date: string;
+  total: number;
+  manifestPath: string;
+  campaignDir: string;
+  items: GeneratedPipelineItem[];
+};
 
 type AggregatedObjectRow = {
   id: string;
@@ -517,7 +578,7 @@ export async function brokerApiRoutes(server: FastifyInstance) {
       .from("broker_company_directory")
       .select(
         "id,company_name,email,site_title,company_type,city,city_district,region,federal_district,rubric,subrubric,subrubric_type,coordinates,working_hours,timezone,business_status,internet_rating,review_count_estimate,domain,source,source_file,import_batch,created_at,updated_at",
-        { count: "exact" },
+        { count: "planned" },
       )
       .order("company_name", { ascending: true })
       .limit(limit);
@@ -1274,6 +1335,182 @@ export async function brokerApiRoutes(server: FastifyInstance) {
     };
   });
 
+  server.get<{ Params: { id: string } }>("/campaigns/:id/execution", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    return normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey));
+  });
+
+  server.put<{ Params: { id: string }; Body: CampaignExecutionBody }>("/campaigns/:id/execution", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+
+    try {
+      const nextState = {
+        ...normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey)),
+        monthLabel: normalizeNullableString(request.body?.monthLabel, 240),
+        schedules: normalizeExecutionSchedules(request.body?.schedules),
+      };
+      writeCampaignExecutionState(resolved.companyKey, nextState);
+      return nextState;
+    } catch (error) {
+      return reply.status(400).send({ error: error instanceof Error ? error.message : "Некорректное расписание" });
+    }
+  });
+
+  server.post<{ Params: { id: string } }>("/campaigns/:id/execution/launch-today", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    const state = normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey));
+    const today = moscowIsoDate();
+    const schedule = state.schedules.find((item) => item.date === today);
+    if (!schedule) {
+      return reply.status(400).send({ error: `На ${today} нет manifest в расписании` });
+    }
+    if (activeExecutionRuns.get(resolved.companyKey)?.status === "running") {
+      return reply.status(409).send({ error: "По объекту уже идет отправка" });
+    }
+
+    const run = createExecutionRun(schedule);
+    activeExecutionRuns.set(resolved.companyKey, run);
+    persistExecutionRun(resolved.companyKey, run);
+    void launchManifestRun(resolved.companyKey, run);
+    return { ok: true, state: normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey)) };
+  });
+
+  server.post<{ Params: { id: string } }>("/campaigns/:id/pipeline/generate-today", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    try {
+      const generated = await generateTodayPipelineForObject(server, resolved.companyKey);
+      const current = normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey));
+      const schedules = [
+        ...current.schedules.filter((item) => item.date !== generated.date),
+        {
+          date: generated.date,
+          manifestPath: generated.manifestPath,
+          label: `auto ${generated.date}`,
+        },
+      ].sort((a, b) => a.date.localeCompare(b.date));
+      const nextState = {
+        ...current,
+        schedules,
+        generatedPreview: generated,
+      };
+      writeCampaignExecutionState(resolved.companyKey, nextState);
+      return { ok: true, state: normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey)) };
+    } catch (error) {
+      return reply.status(400).send({ error: error instanceof Error ? error.message : "Не удалось собрать очередь" });
+    }
+  });
+
+  server.post<{ Params: { id: string } }>("/campaigns/:id/playbook/generate-copy", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    try {
+      const scope = await resolveHypothesisScope(server, resolved.companyKey);
+      if (!scope?.objectDetail) return reply.status(404).send({ error: "Не удалось определить объект" });
+      const existing = await selectPlaybookByCompanyKey(server, resolved.companyKey);
+      if (existing.error) return reply.status(500).send({ error: existing.error.message });
+      const generated = buildAutoLetterPlaybook(scope.objectDetail, existing.data || null, resolved.companyName);
+      const { data, error } = await upsertPlaybook(server, {
+        company_key: resolved.companyKey,
+        company_name: resolved.companyName,
+        status: normalizeNullableString(existing.data?.status, 80) || "draft",
+        subject: generated.subject,
+        letter_body: generated.letterBody,
+        ping_one: generated.pingOne,
+        ping_two: generated.pingTwo,
+        ping_three: generated.pingThree,
+        monthly_plan: normalizeObjectPlan(existing.data?.monthly_plan),
+        weekly_plan: normalizeObjectPlan(existing.data?.weekly_plan),
+        daily_plan: normalizeObjectPlan(existing.data?.daily_plan),
+        updated_at: new Date().toISOString(),
+      });
+      if (error) return reply.status(500).send({ error: error.message });
+      const objectDetail = await loadObjectDetail(server, resolved.companyKey.slice("object:".length));
+      const targets = Array.isArray(objectDetail?.targets) ? objectDetail.targets : [];
+      const saved = data ?? generated;
+      const monthlyPlan = normalizeObjectPlan((saved as Record<string, unknown>).monthly_plan);
+      const weeklyPlan = normalizeObjectPlan((saved as Record<string, unknown>).weekly_plan);
+      const dailyPlan = normalizeObjectPlan((saved as Record<string, unknown>).daily_plan);
+      return {
+        ...saved,
+        monthly_plan: monthlyPlan,
+        weekly_plan: weeklyPlan,
+        daily_plan: dailyPlan,
+        monthly_progress: buildObjectPlanProgress(monthlyPlan, targets, "month"),
+        weekly_progress: buildObjectPlanProgress(weeklyPlan, targets, "week"),
+        daily_progress: buildObjectPlanProgress(dailyPlan, targets, "day"),
+      };
+    } catch (error) {
+      return reply.status(400).send({ error: error instanceof Error ? error.message : "Не удалось сгенерировать письмо" });
+    }
+  });
+
+  server.post<{ Params: { id: string } }>("/campaigns/:id/playbook/generate-followups", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    try {
+      const scope = await resolveHypothesisScope(server, resolved.companyKey);
+      if (!scope?.objectDetail) return reply.status(404).send({ error: "Не удалось определить объект" });
+      const existing = await selectPlaybookByCompanyKey(server, resolved.companyKey);
+      if (existing.error) return reply.status(500).send({ error: existing.error.message });
+      const generated = buildAutoLetterPlaybook(scope.objectDetail, existing.data || null, resolved.companyName);
+      const { data, error } = await upsertPlaybook(server, {
+        company_key: resolved.companyKey,
+        company_name: resolved.companyName,
+        status: normalizeNullableString(existing.data?.status, 80) || "draft",
+        subject: normalizeNullableString(existing.data?.subject, 4000),
+        letter_body: normalizeNullableString(existing.data?.letter_body, 20000),
+        ping_one: generated.pingOne,
+        ping_two: generated.pingTwo,
+        ping_three: generated.pingThree,
+        monthly_plan: normalizeObjectPlan(existing.data?.monthly_plan),
+        weekly_plan: normalizeObjectPlan(existing.data?.weekly_plan),
+        daily_plan: normalizeObjectPlan(existing.data?.daily_plan),
+        updated_at: new Date().toISOString(),
+      });
+      if (error) return reply.status(500).send({ error: error.message });
+      const objectDetail = await loadObjectDetail(server, resolved.companyKey.slice("object:".length));
+      const targets = Array.isArray(objectDetail?.targets) ? objectDetail.targets : [];
+      const saved = data ?? generated;
+      const monthlyPlan = normalizeObjectPlan((saved as Record<string, unknown>).monthly_plan);
+      const weeklyPlan = normalizeObjectPlan((saved as Record<string, unknown>).weekly_plan);
+      const dailyPlan = normalizeObjectPlan((saved as Record<string, unknown>).daily_plan);
+      return {
+        ...saved,
+        monthly_plan: monthlyPlan,
+        weekly_plan: weeklyPlan,
+        daily_plan: dailyPlan,
+        monthly_progress: buildObjectPlanProgress(monthlyPlan, targets, "month"),
+        weekly_progress: buildObjectPlanProgress(weeklyPlan, targets, "week"),
+        daily_progress: buildObjectPlanProgress(dailyPlan, targets, "day"),
+      };
+    } catch (error) {
+      return reply.status(400).send({ error: error instanceof Error ? error.message : "Не удалось сгенерировать follow-up" });
+    }
+  });
+
+  server.post<{ Params: { id: string }; Body: { date?: string } }>("/campaigns/:id/execution/launch", async (request, reply) => {
+    const resolved = await resolvePlaybookTarget(server, request.params.id);
+    if (!resolved) return reply.status(404).send({ error: "Объект не найден" });
+    const state = normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey));
+    const date = normalizeNullableString(request.body?.date, 32);
+    if (!date) return reply.status(400).send({ error: "Требуется дата запуска" });
+    const schedule = state.schedules.find((item) => item.date === date);
+    if (!schedule) return reply.status(404).send({ error: `В расписании нет строки на ${date}` });
+    if (activeExecutionRuns.get(resolved.companyKey)?.status === "running") {
+      return reply.status(409).send({ error: "По объекту уже идет отправка" });
+    }
+
+    const run = createExecutionRun(schedule);
+    activeExecutionRuns.set(resolved.companyKey, run);
+    persistExecutionRun(resolved.companyKey, run);
+    void launchManifestRun(resolved.companyKey, run);
+    return { ok: true, state: normalizeCampaignExecutionState(readCampaignExecutionState(resolved.companyKey)) };
+  });
+
   server.patch<{ Params: { id: string }; Body: CampaignBody }>("/campaigns/:id", async (request, reply) => {
     const payload = buildCampaignPatchPayload(request.body);
     const { data, error } = await server.db
@@ -1789,7 +2026,7 @@ function emptyCampaignStats() {
   };
 }
 
-async function selectPlaybookByCompanyKey(server: FastifyInstance, companyKey: string) {
+async function selectPlaybookByCompanyKey(server: FastifyInstance, companyKey: string): Promise<{ data: CompanyPlaybookRow | null; error: { message?: string; code?: string } | null }> {
   const preferred = await server.db
     .from("broker_company_playbooks")
     .select(PLAYBOOK_PLAN_SELECT)
@@ -1842,15 +2079,588 @@ async function upsertPlaybook(server: FastifyInstance, payload: Record<string, u
   };
 }
 
-function withEmbeddedPlans(value: Record<string, unknown>) {
+function moscowIsoDate() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: MOSCOW_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function readExecutionStateStore(): Record<string, CampaignExecutionState> {
+  try {
+    if (!fs.existsSync(EXECUTION_STATE_PATH)) return {};
+    return JSON.parse(fs.readFileSync(EXECUTION_STATE_PATH, "utf8")) as Record<string, CampaignExecutionState>;
+  } catch {
+    return {};
+  }
+}
+
+function writeExecutionStateStore(store: Record<string, CampaignExecutionState>) {
+  fs.mkdirSync(EXECUTION_STATE_DIR, { recursive: true });
+  fs.writeFileSync(EXECUTION_STATE_PATH, JSON.stringify(store, null, 2), "utf8");
+}
+
+function resolveWorkerRelativePath(inputPath: string) {
+  const cleaned = String(inputPath || "").trim();
+  const resolved = path.isAbsolute(cleaned)
+    ? path.resolve(cleaned)
+    : path.resolve(DEAL_WORKER_ROOT, cleaned);
+  const relative = path.relative(DEAL_WORKER_ROOT, resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("Файл должен лежать внутри deal_worker");
+  }
+  return resolved;
+}
+
+function normalizeExecutionSchedules(input: unknown) {
+  if (!Array.isArray(input)) return [] as ExecutionScheduleRow[];
+  const seen = new Set<string>();
+  return input
+    .map((item) => {
+      const row = item as ExecutionScheduleRow;
+      const date = normalizeString(row?.date, 32);
+      const manifestPath = normalizeString(row?.manifestPath, 2000);
+      const label = normalizeNullableString(row?.label, 240);
+      if (!date || !manifestPath) return null;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`Некорректная дата: ${date}`);
+      const resolvedManifest = resolveWorkerRelativePath(manifestPath);
+      if (!fs.existsSync(resolvedManifest)) throw new Error(`Manifest не найден: ${manifestPath}`);
+      if (seen.has(date)) return null;
+      seen.add(date);
+      return {
+        date,
+        manifestPath: path.relative(DEAL_WORKER_ROOT, resolvedManifest),
+        label,
+      };
+    })
+    .filter(Boolean) as ExecutionScheduleRow[];
+}
+
+function normalizeCampaignExecutionState(input: CampaignExecutionState | null | undefined): CampaignExecutionState {
+  return {
+    monthLabel: normalizeNullableString(input?.monthLabel, 240),
+    schedules: normalizeExecutionSchedules(input?.schedules || []),
+    lastRun: input?.lastRun || null,
+    runs: Array.isArray(input?.runs) ? input!.runs.slice(0, 20) : [],
+    generatedPreview: input?.generatedPreview || null,
+  };
+}
+
+function readCampaignExecutionState(companyKey: string) {
+  const store = readExecutionStateStore();
+  return store[companyKey] || null;
+}
+
+function writeCampaignExecutionState(companyKey: string, value: CampaignExecutionState) {
+  const store = readExecutionStateStore();
+  store[companyKey] = value;
+  writeExecutionStateStore(store);
+}
+
+function persistExecutionRun(companyKey: string, run: CampaignExecutionRun) {
+  const current = normalizeCampaignExecutionState(readCampaignExecutionState(companyKey));
+  const runs = [run, ...current.runs.filter((item) => item.id !== run.id)].slice(0, 20);
+  writeCampaignExecutionState(companyKey, {
+    ...current,
+    lastRun: run,
+    runs,
+  });
+}
+
+function createExecutionRun(schedule: ExecutionScheduleRow): CampaignExecutionRun {
+  return {
+    id: `run_${Date.now()}`,
+    date: schedule.date || null,
+    manifestPath: schedule.manifestPath,
+    label: schedule.label || null,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    output: "",
+    error: null,
+  };
+}
+
+async function launchManifestRun(companyKey: string, run: CampaignExecutionRun) {
+  const manifestAbsolute = resolveWorkerRelativePath(run.manifestPath);
+  const manifestRelative = path.relative(DEAL_WORKER_ROOT, manifestAbsolute);
+  const args = [
+    "--import",
+    "tsx",
+    "scripts/send_parallel_manifest.ts",
+    `--manifest=${manifestRelative}`,
+  ];
+
+  await new Promise<void>((resolve) => {
+    const child = spawn("node", args, {
+      cwd: DEAL_WORKER_ROOT,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let output = "";
+    const appendOutput = (chunk: unknown) => {
+      output += String(chunk);
+      run.output = output.slice(-12000);
+      persistExecutionRun(companyKey, run);
+    };
+
+    child.stdout.on("data", appendOutput);
+    child.stderr.on("data", appendOutput);
+    child.on("error", (error) => {
+      run.status = "failed";
+      run.error = error.message;
+      run.completedAt = new Date().toISOString();
+      persistExecutionRun(companyKey, run);
+      activeExecutionRuns.delete(companyKey);
+      resolve();
+    });
+    child.on("exit", (code) => {
+      run.status = code === 0 ? "completed" : "failed";
+      run.error = code === 0 ? null : `exit code ${code}`;
+      run.completedAt = new Date().toISOString();
+      persistExecutionRun(companyKey, run);
+      activeExecutionRuns.delete(companyKey);
+      resolve();
+    });
+  });
+}
+
+const AUTO_SENDER_ENVS = [
+  "RESEND_FROM_S8ESTATE_ONLINE",
+  "RESEND_FROM_SECTOR8ESTATE_ONLINE",
+  "RESEND_FROM_SECTOR8ESTATE_RU",
+  "RESEND_FROM_ASTANA_ONLINE",
+  "RESEND_FROM_ASTANA",
+  "RESEND_FROM_MTIOC",
+  "RESEND_FROM_TECHCATALYST",
+  "RESEND_FROM_THESAUROS_TECH",
+  "RESEND_FROM_PATENKOV",
+  "RESEND_FROM_S8ESTATE_RU",
+];
+
+function ensureDir(dirPath: string) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function csvCell(value: string | number | null | undefined) {
+  return JSON.stringify(String(value ?? ""));
+}
+
+function writeCsvFile(filePath: string, header: string[], rows: Array<Array<string | number | null | undefined>>) {
+  ensureDir(path.dirname(filePath));
+  const lines = [header.map(csvCell).join(",")];
+  for (const row of rows) lines.push(row.map(csvCell).join(","));
+  fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+}
+
+function readGlobalSuppressedEmails() {
+  const suppressionPath = path.join(DEAL_WORKER_ROOT, "assets", "sales_campaigns", "email_suppression_list.csv");
+  const set = new Set<string>();
+  if (!fs.existsSync(suppressionPath)) return set;
+  const text = fs.readFileSync(suppressionPath, "utf8");
+  const lines = text.split(/\r?\n/).slice(1);
+  for (const line of lines) {
+    const value = line.split(",")[0]?.replace(/^"|"$/g, "").trim().toLowerCase();
+    if (value && value.includes("@")) set.add(value);
+  }
+  return set;
+}
+
+function slugifyValue(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9а-яё]+/gi, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80) || "object";
+}
+
+function buildFirstTouchTemplate(subject: string, body: string) {
+  const cleanSubject = normalizeString(subject, 4000) || "Предложение по объекту";
+  const cleanBody = normalizeString(body, 20000) || "Добрый день. Направляю предложение по объекту. Если интересно, отправлю материалы и короткий бриф.";
+  return `Subject: ${cleanSubject}\n\n${cleanBody}\n`;
+}
+
+function firstNonEmpty(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const normalized = normalizeString(value, 4000);
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function truncateSentence(value: string, limit = 180) {
+  const normalized = normalizeString(value, 4000);
+  if (normalized.length <= limit) return normalized;
+  return normalized.slice(0, limit - 1).trimEnd() + "…";
+}
+
+function propertyUseCases(property: PropertyIndexRow | Record<string, unknown> | null | undefined) {
+  const title = firstNonEmpty(String((property as Record<string, unknown> | null)?.title || ""));
+  const address = firstNonEmpty(String((property as Record<string, unknown> | null)?.address || ""));
+  const text = `${title} ${address}`.toLowerCase();
+  if (/1905|ульянов|испанск|дзен|деснар|арбат|стрит|retail|торгов/i.test(text)) {
+    return "торговлю и услуги, медицинский формат, аптеку, салон красоты или покупку под аренду";
+  }
+  if (/грига|прокшино|офис|полянк/i.test(text)) {
+    return "клинику, размещение своего офиса, покупку под свои задачи или покупку с расчетом на дальнейшую продажу";
+  }
+  if (/аббакум|ступино|можайск|земл|участ/i.test(text)) {
+    return "девелопмент, земельный резерв или малоэтажный проект";
+  }
+  return "покупателя под понятное использование или покупку под доход";
+}
+
+function buildAutoLetterPlaybook(
+  objectDetail: Record<string, unknown>,
+  existingPlaybook: Record<string, unknown> | null,
+  companyName: string,
+) {
+  const property = (objectDetail.property as Record<string, unknown> | null) || null;
+  const brief = (objectDetail.brief as Record<string, unknown> | null) || null;
+  const hypotheses = Array.isArray(objectDetail.hypotheses) ? objectDetail.hypotheses as Array<Record<string, unknown>> : [];
+  const topHypothesis = hypotheses
+    .slice()
+    .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0))[0] || null;
+
+  const objectTitle = firstNonEmpty(
+    String(objectDetail.campaign_name || ""),
+    String(property?.title || ""),
+    companyName,
+  );
+  const address = firstNonEmpty(String(property?.address || ""));
+  const region = firstNonEmpty(String((property as Record<string, unknown> | null)?.region || ""));
+  const valueProp = firstNonEmpty(String(topHypothesis?.value_prop || ""));
+  const segmentName = firstNonEmpty(String(topHypothesis?.segment_name || ""), String(topHypothesis?.segment_type || ""), "подходящего покупателя");
+  const reasoning = firstNonEmpty(String(topHypothesis?.reasoning || ""));
+  const originalBrief = firstNonEmpty(String(brief?.original_brief || ""));
+  const pain = /земл|участ|малоэтаж|land/i.test(`${objectTitle} ${originalBrief}`.toLowerCase())
+    ? "На рынке много участков, но мало действительно внятно упакованных площадок, где понятно, как заработать и как быстро зайти в сделку."
+    : "На рынке много шумных предложений, но мало объектов, которые можно быстро сопоставить с реальным запросом клиента без долгой расшифровки.";
+  const hook = /мед|clinic|стомат|лабо|1905|полянк|грига|прокшино/i.test(`${objectTitle} ${valueProp} ${reasoning}`.toLowerCase())
+    ? "Сейчас лучше работают не массовые предложения, а точечные объекты под понятный круг покупателей: клиника, инвестор, сетевой оператор или компания для своего размещения."
+    : "Сейчас лучше работают не общие предложения, а понятные объекты, по которым сразу ясно, кому и зачем их показывать.";
+  const compliment = valueProp
+    ? `Судя по профилю вашей компании, вам ближе всего история про ${truncateSentence(valueProp.toLowerCase(), 120)}.`
+    : `Судя по вашему профилю, вам может подойти объект с понятной экономикой и ясной задачей.`;
+  const personalization = `Добрый день. Посмотрел ваш профиль и сопоставил его с объектом ${objectTitle}${address ? ` (${address})` : ""}.`;
+  const solution = `Сейчас у нас в работе ${objectTitle}${region ? `, ${region}` : ""}. Это объект под ${propertyUseCases(property)}.`;
+  const caseLine = reasoning
+    ? `Почему пишу именно вам: ${truncateSentence(reasoning, 220)}`
+    : `Логика простая: объект стоит вести адресно по группе "${segmentName}", а не размывать по широкой базе.`;
+  const cta = `Если направление для вас рабочее, ответным письмом отправлю короткий пакет материалов и сразу скажу, есть ли смысл детально смотреть объект.`;
+
+  const subject = firstNonEmpty(
+    normalizeNullableString(existingPlaybook?.subject as string, 4000),
+    `${objectTitle}: адресно для ${segmentName}`,
+  );
+
+  const letterBody = [
+    personalization,
+    "",
+    compliment,
+    "",
+    hook,
+    "",
+    pain,
+    "",
+    solution,
+    "",
+    caseLine,
+    "",
+    cta,
+  ].join("\n");
+
+  const pingOne = `Возвращаюсь к письму по ${objectTitle}. Если у вас сейчас есть запрос под ${propertyUseCases(property)}, могу сразу отправить короткий пакет материалов без лишней переписки.`;
+  const pingTwo = `Коротко напоминаю про ${objectTitle}. Объект стоит вести адресно именно по группе "${segmentName}". Если тема в фокусе, вышлю материалы сегодня.`;
+  const pingThree = `Последнее письмо по ${objectTitle}. Если тема для вас неактуальна, зафиксирую это и сниму вас с рассылки. Если интерес есть, просто ответьте одним словом — отправлю пакет.`;
+
+  return {
+    status: normalizeNullableString(existingPlaybook?.status as string, 80) || "draft",
+    subject,
+    letterBody,
+    pingOne,
+    pingTwo,
+    pingThree,
+    monthly_plan: normalizeObjectPlan(existingPlaybook?.monthly_plan),
+    weekly_plan: normalizeObjectPlan(existingPlaybook?.weekly_plan),
+    daily_plan: normalizeObjectPlan(existingPlaybook?.daily_plan),
+  };
+}
+
+function inferenceText(...values: Array<string | null | undefined>) {
+  return values.map((item) => normalizeString(item, 4000).toLowerCase()).filter(Boolean).join(" ");
+}
+
+function isLikelyBrokerNoise(row: CompanyDirectoryRow) {
+  const haystack = inferenceText(row.company_name, row.site_title, row.company_type, row.rubric, row.subrubric, row.subrubric_type);
+  return [
+    "broker",
+    "real estate",
+    "realty",
+    "недвижим",
+    "агентств",
+    "риелт",
+    "consult",
+    "консалт",
+  ].some((token) => haystack.includes(token));
+}
+
+function buildSegmentKeywords(scope: Awaited<ReturnType<typeof resolveHypothesisScope>>) {
+  const keywords = new Map<string, string[]>();
+  const objectText = inferenceText(
+    scope?.objectDetail?.campaign_name,
+    scope?.objectDetail?.property?.title,
+    scope?.objectDetail?.property?.address,
+    scope?.objectDetail?.objective,
+    scope?.objectDetail?.brief?.original_brief,
+  );
+  const hypotheses = Array.isArray(scope?.objectDetail?.hypotheses) ? scope!.objectDetail!.hypotheses : [];
+  for (const item of hypotheses) {
+    const segment = normalizeString(String(item.segment_name || item.segment_type || "generic"), 240);
+    const sourceText = inferenceText(segment, String(item.segment_type || ""), String(item.value_prop || ""), String(item.reasoning || ""), objectText);
+    const bag = new Set<string>();
+    if (/clinic|medical|dent|lab|мед|клин|диаг|стомат|лаборатор/i.test(sourceText)) {
+      ["medical", "clinic", "dental", "diagnostic", "laboratory", "мед", "клин", "стомат", "лабо"].forEach((t) => bag.add(t));
+    }
+    if (/pharmacy|аптек|pharma/i.test(sourceText)) {
+      ["pharmacy", "pharma", "аптек", "лекар"].forEach((t) => bag.add(t));
+    }
+    if (/retail|store|food|coffee|bakery|beauty|service|ритейл|магаз|кофе|пекар|beauty|сервис/i.test(sourceText)) {
+      ["retail", "store", "food", "coffee", "bakery", "beauty", "service", "ритейл", "магаз", "кофе", "пекар", "сервис"].forEach((t) => bag.add(t));
+    }
+    if (/office|hq|education|showroom|офис|штаб|образов|шоурум/i.test(sourceText)) {
+      ["office", "hq", "education", "showroom", "consulting", "legal", "it", "офис", "образов", "шоурум", "юрид"].forEach((t) => bag.add(t));
+    }
+    if (/land|low-rise|ижс|коттедж|посел|земл|девелоп/i.test(sourceText)) {
+      ["land", "development", "developer", "low-rise", "ижс", "коттедж", "посел", "земл", "девелоп"].forEach((t) => bag.add(t));
+    }
+    if (!bag.size) {
+      objectText.split(/\s+/).filter((token) => token.length >= 4).slice(0, 12).forEach((token) => bag.add(token));
+    }
+    keywords.set(segment || "generic", Array.from(bag));
+  }
+  if (!keywords.size) {
+    keywords.set("generic", objectText.split(/\s+/).filter((token) => token.length >= 4).slice(0, 12));
+  }
+  return keywords;
+}
+
+function scoreDirectoryRow(row: CompanyDirectoryRow, segmentKeywords: Map<string, string[]>) {
+  const haystack = inferenceText(
+    row.company_name,
+    row.site_title,
+    row.company_type,
+    row.rubric,
+    row.subrubric,
+    row.subrubric_type,
+    row.city,
+    row.region,
+  );
+
+  let bestScore = 0;
+  let matchedSegment = "generic";
+  for (const [segment, words] of segmentKeywords.entries()) {
+    let score = 0;
+    for (const word of words) {
+      if (word && haystack.includes(word.toLowerCase())) score += 3;
+    }
+    if (row.rubric && words.some((word) => row.rubric!.toLowerCase().includes(word))) score += 4;
+    if (row.subrubric && words.some((word) => row.subrubric!.toLowerCase().includes(word))) score += 5;
+    if (score > bestScore) {
+      bestScore = score;
+      matchedSegment = segment;
+    }
+  }
+  return { score: bestScore, matchedSegment };
+}
+
+async function generateTodayPipelineForObject(server: FastifyInstance, companyKey: string): Promise<CampaignGeneratedPreview> {
+  if (!companyKey.startsWith("object:")) throw new Error("Генерация доступна только для объектного scope");
+  const objectKey = companyKey.slice("object:".length);
+  const [scope, playbook, directoryRows, seenTargets] = await Promise.all([
+    resolveHypothesisScope(server, companyKey),
+    selectPlaybookByCompanyKey(server, companyKey),
+    server.db
+      .from("broker_company_directory")
+      .select("id,company_name,email,site_title,company_type,city,city_district,region,federal_district,rubric,subrubric,subrubric_type,coordinates,working_hours,timezone,business_status,internet_rating,review_count_estimate,domain,source,source_file,import_batch,created_at,updated_at")
+      .limit(12000)
+      .returns<CompanyDirectoryRow[]>(),
+    server.db
+      .from("broker_campaign_targets")
+      .select("email,company_name,status,domain")
+      .returns<Array<{ email: string; company_name: string; status: string; domain: string | null }>>(),
+  ]);
+
+  if (directoryRows.error) throw new Error(directoryRows.error.message);
+  if (seenTargets.error) throw new Error(seenTargets.error.message);
+  if (!scope?.objectDetail) throw new Error("Не удалось определить объектную гипотезу");
+
+  const objectDetail = await loadObjectDetail(server, objectKey);
+  const targets = Array.isArray(objectDetail?.targets) ? objectDetail.targets : [];
+  const dailyPlan = normalizeObjectPlan(playbook.data?.daily_plan);
+  const dailyProgress = buildObjectPlanProgress(dailyPlan, targets, "day");
+  const remaining = Math.max(0, dailyPlan.firstTouchTarget - (dailyProgress.actual.firstTouchCount || 0));
+  if (remaining <= 0) throw new Error("Дневной план по first-touch уже закрыт");
+
+  const seenEmails = new Set<string>();
+  const seenCompanies = new Set<string>();
+  for (const row of seenTargets.data || []) {
+    if (row.email) seenEmails.add(normalizeString(row.email, 240).toLowerCase());
+    if (row.company_name) seenCompanies.add(companyRegistryKey(row.company_name, row.email));
+  }
+  for (const row of targets) {
+    if (row.email) seenEmails.add(normalizeString(row.email, 240).toLowerCase());
+    if (row.company_name) seenCompanies.add(companyRegistryKey(row.company_name, row.email));
+  }
+  const suppressedEmails = readGlobalSuppressedEmails();
+  const segmentKeywords = buildSegmentKeywords(scope);
+
+  const scored = (directoryRows.data || [])
+    .filter((row) => row.email && row.company_name)
+    .filter((row) => !seenEmails.has(normalizeString(row.email, 240).toLowerCase()))
+    .filter((row) => !suppressedEmails.has(normalizeString(row.email, 240).toLowerCase()))
+    .filter((row) => !seenCompanies.has(companyRegistryKey(row.company_name, row.email)))
+    .filter((row) => !isLikelyBrokerNoise(row))
+    .map((row) => {
+      const { score, matchedSegment } = scoreDirectoryRow(row, segmentKeywords);
+      return { row, score, matchedSegment };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) =>
+      b.score - a.score ||
+      normalizeString(a.row.company_name, 240).localeCompare(normalizeString(b.row.company_name, 240)),
+    )
+    .slice(0, remaining);
+
+  if (!scored.length) throw new Error("Не удалось подобрать новых получателей под текущие гипотезы");
+
+  const date = moscowIsoDate();
+  const objectSlug = slugifyValue(scope.objectDetail.campaign_name || scope.objectDetail.property?.title || objectKey);
+  const campaignDirRelative = path.join("assets", "sales_campaigns", "generated", objectSlug, `${date}_auto_pipeline`);
+  const campaignDirAbsolute = path.join(DEAL_WORKER_ROOT, campaignDirRelative);
+  ensureDir(path.join(campaignDirAbsolute, "00_state"));
+  ensureDir(path.join(campaignDirAbsolute, "01_templates"));
+  ensureDir(path.join(campaignDirAbsolute, "02_strategy"));
+  ensureDir(path.join(campaignDirAbsolute, "03_lists", "prepared"));
+  ensureDir(path.join(campaignDirAbsolute, "03_lists", "manifests"));
+  ensureDir(path.join(campaignDirAbsolute, "04_logs", "resend"));
+
+  const trackerPath = path.join(campaignDirAbsolute, "00_state", "response_tracker.csv");
+  if (!fs.existsSync(trackerPath)) {
+    fs.writeFileSync(trackerPath, "object,company,email,sent_date,reply_date,reply_type,interested,call_scheduled,materials_requested,status,next_action,notes\n", "utf8");
+  }
+  const suppressionPath = path.join(campaignDirAbsolute, "00_state", "email_suppression_list.csv");
+  writeCsvFile(suppressionPath, ["email"], Array.from(suppressedEmails).sort().map((email) => [email]));
+
+  const templateRelative = path.join(campaignDirRelative, "01_templates", "first_touch.md");
+  fs.writeFileSync(
+    path.join(campaignDirAbsolute, "01_templates", "first_touch.md"),
+    buildFirstTouchTemplate(playbook.data?.subject as string, playbook.data?.letter_body as string),
+    "utf8",
+  );
+
+  const laneBuckets = AUTO_SENDER_ENVS.map(() => [] as typeof scored);
+  scored.forEach((item, index) => {
+    laneBuckets[index % AUTO_SENDER_ENVS.length].push(item);
+  });
+
+  const laneManifestRows: Array<Array<string | number | null | undefined>> = [];
+  const previewItems: GeneratedPipelineItem[] = [];
+  laneBuckets.forEach((bucket, index) => {
+    if (!bucket.length) return;
+    const lane = `lane${String(index + 1).padStart(2, "0")}`;
+    const laneFilename = `${lane}_today_first_touch_${date}.csv`;
+    const laneRelative = path.join(campaignDirRelative, "03_lists", "prepared", laneFilename);
+    const laneAbsolute = path.join(campaignDirAbsolute, "03_lists", "prepared", laneFilename);
+    writeCsvFile(
+      laneAbsolute,
+      ["object", "priority", "company", "channel", "email", "status", "note"],
+      bucket.map((item) => [
+        canonicalObjectTitle(scope.objectDetail?.property?.title || scope.objectDetail?.campaign_name || ""),
+        String(Math.max(1, 100 - item.score)),
+        item.row.company_name,
+        "email",
+        item.row.email.toLowerCase(),
+        "ready_to_send",
+        `segment=${item.matchedSegment}; score=${item.score}; city=${item.row.city || ""}; rubric=${item.row.rubric || ""}`,
+      ]),
+    );
+    laneManifestRows.push([
+      lane,
+      campaignDirRelative,
+      laneRelative,
+      AUTO_SENDER_ENVS[index],
+      templateRelative,
+      "sent",
+      "T+3 follow-up if no reply",
+      "60000",
+    ]);
+    for (const item of bucket) {
+      previewItems.push({
+        companyName: item.row.company_name,
+        email: item.row.email.toLowerCase(),
+        city: item.row.city,
+        region: item.row.region,
+        rubric: item.row.rubric,
+        subrubric: item.row.subrubric,
+        score: item.score,
+        matchedSegment: item.matchedSegment,
+      });
+    }
+  });
+
+  const manifestRelative = path.join(campaignDirRelative, "03_lists", "manifests", `parallel_10_domains_today_${date}.csv`);
+  writeCsvFile(
+    path.join(campaignDirAbsolute, "03_lists", "manifests", `parallel_10_domains_today_${date}.csv`),
+    ["lane", "campaign_dir", "recipients", "from_env", "template_path", "tracker_status", "next_action", "delay_ms"],
+    laneManifestRows,
+  );
+
+  fs.writeFileSync(
+    path.join(campaignDirAbsolute, "02_strategy", `today_pipeline_${date}.md`),
+    [
+      `# Auto-generated today pipeline`,
+      ``,
+      `- Date: \`${date}\``,
+      `- Object: \`${scope.objectDetail.campaign_name || scope.objectDetail.property?.title || objectKey}\``,
+      `- First-touch target remaining today: \`${remaining}\``,
+      `- Generated recipients: \`${previewItems.length}\``,
+      `- Manifest: \`${manifestRelative}\``,
+    ].join("\n"),
+    "utf8",
+  );
+
+  return {
+    date,
+    total: previewItems.length,
+    manifestPath: manifestRelative,
+    campaignDir: campaignDirRelative,
+    items: previewItems.slice(0, 50),
+  };
+}
+
+function withEmbeddedPlans(value: Record<string, unknown>): CompanyPlaybookRow {
   const parsed = extractPlansFromLetterBody(normalizeNullableString(value.letter_body, 20000));
   return {
+    id: normalizeString(value.id, 200) || "",
+    company_key: normalizeString(value.company_key, 400) || "",
+    company_name: normalizeString(value.company_name, 400) || "",
+    status: normalizeString(value.status, 80) || "draft",
+    subject: normalizeNullableString(value.subject, 4000),
+    ping_one: normalizeNullableString(value.ping_one, 12000),
+    ping_two: normalizeNullableString(value.ping_two, 12000),
+    ping_three: normalizeNullableString(value.ping_three, 12000),
+    created_at: normalizeString(value.created_at, 100) || "",
+    updated_at: normalizeString(value.updated_at, 100) || "",
     ...value,
     letter_body: parsed.letterBody,
     monthly_plan: parsed.monthlyPlan,
     weekly_plan: parsed.weeklyPlan,
     daily_plan: parsed.dailyPlan,
-  };
+  } as CompanyPlaybookRow;
 }
 
 function isMissingPlaybookPlanColumnError(error: { message?: string; code?: string } | null) {
@@ -2038,8 +2848,6 @@ function embedPlansInLetterBody(letterBody: string | null, plans: {
   const serialized = JSON.stringify(plans);
   return `${cleanBody}${PLAYBOOK_PLAN_MARKER_PREFIX}${serialized}${PLAYBOOK_PLAN_MARKER_SUFFIX}`;
 }
-
-const MOSCOW_TIMEZONE = "Europe/Moscow";
 
 function emptyObjectPlan(): ObjectPlan {
   return {

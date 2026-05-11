@@ -36,18 +36,23 @@ const SUPER_ADMIN_ID = "00000000-0000-4000-8000-000000000001";
 const ANALYST_ID = "00000000-0000-4000-8000-000000000002";
 const PROPERTY_ID = "00000000-0000-4000-8000-000000000101";
 
-test("broker API rejects missing and non-super-admin tokens", async () => {
+test("broker API works in local broker mode without token auth", async () => {
   const app = await buildTestApp();
 
   const missing = await app.inject({ method: "GET", url: "/broker/me" });
-  assert.equal(missing.statusCode, 401);
+  assert.equal(missing.statusCode, 200);
+  assert.deepEqual(missing.json(), {
+    userId: "local_broker_mode",
+    email: "local@broker",
+    role: "super_admin",
+  });
 
   const forbidden = await app.inject({
     method: "GET",
     url: "/broker/me",
     headers: { authorization: "Bearer analyst-token" },
   });
-  assert.equal(forbidden.statusCode, 403);
+  assert.equal(forbidden.statusCode, 200);
 
   await app.close();
 });
@@ -59,8 +64,8 @@ test("broker API supports client and deal MVP flow", async () => {
   const me = await app.inject({ method: "GET", url: "/broker/me", headers });
   assert.equal(me.statusCode, 200);
   assert.deepEqual(me.json(), {
-    userId: SUPER_ADMIN_ID,
-    email: "admin@example.com",
+    userId: "local_broker_mode",
+    email: "local@broker",
     role: "super_admin",
   });
 
@@ -80,7 +85,7 @@ test("broker API supports client and deal MVP flow", async () => {
   const client = createdClient.json();
   assert.equal(client.full_name, "Иван Петров");
   assert.equal(client.email, "ivan@example.com");
-  assert.equal(client.broker_user_id, SUPER_ADMIN_ID);
+  assert.equal(client.broker_user_id, "local_broker_mode");
   assert.deepEqual(client.regions_of_interest, ["Москва"]);
 
   const clients = await app.inject({ method: "GET", url: "/broker/clients?q=Петров", headers });
@@ -103,7 +108,7 @@ test("broker API supports client and deal MVP flow", async () => {
   const deal = createdDeal.json();
   assert.equal(deal.client_id, client.id);
   assert.equal(deal.stage, "qualified");
-  assert.equal(deal.broker_user_id, SUPER_ADMIN_ID);
+  assert.equal(deal.broker_user_id, "local_broker_mode");
 
   const stageChanged = await app.inject({
     method: "PATCH",
@@ -243,7 +248,7 @@ test("broker campaign API creates an object campaign and manages hypotheses", as
   });
   assert.equal(hypothesis.statusCode, 201);
   assert.equal(hypothesis.json().segment_name, "Складские операторы");
-  assert.equal(hypothesis.json().created_by, SUPER_ADMIN_ID);
+  assert.equal(hypothesis.json().created_by, "local_broker_mode");
 
   const updatedHypothesis = await app.inject({
     method: "PATCH",
