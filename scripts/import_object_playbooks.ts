@@ -40,12 +40,18 @@ type PlaybookSeed = {
 
 const OBJECT_ALIASES: Record<string, string> = {
   "Аббакумово": "Аббакумово",
+  "Abbakumovo": "Аббакумово",
   "Торговые помещения в Пушкино": "Торговые помещения в Пушкино",
+  "Pushkino": "Торговые помещения в Пушкино",
   "Ступино 12,97 га": "Ступино 12,97 га",
+  "Stupino / Staraya Sitnya": "Ступино 12,97 га",
   "Можайск, 71,89 га": "Можайск, 71,89 га",
+  "Mozhaysk": "Можайск, 71,89 га",
   "Офисное здание на Суворовской площади": "Офисное здание на Суворовской площади",
   "Мичуринский проспект": "Мичуринский проспект",
+  "Michurinskiy 3": "Мичуринский проспект",
   "Коммерческое помещение на ул. 1905 года": "Коммерческое помещение на ул. 1905 года",
+  "Moskva 1905 goda 4s1": "Коммерческое помещение на ул. 1905 года",
   "Бизнес-квартал Прокшино": "Бизнес-квартал Прокшино",
   "Офисный центр на ул. Эдварда Грига": "Офисный центр на ул. Эдварда Грига",
   "Испанские кварталы, коммерческий лот": "Испанские кварталы, коммерческий лот",
@@ -54,6 +60,14 @@ const OBJECT_ALIASES: Record<string, string> = {
   "Новый Арбат, 5": "Новый Арбат, 5",
   "Дмитрия Ульянова, 24": "Дмитрия Ульянова, 24",
   "Большая Полянка, 42 стр. 2": "Большая Полянка, 42 стр. 2",
+  "Полянка 42": "Большая Полянка, 42 стр. 2",
+};
+
+type CsvRow = Record<string, string>;
+
+type WeekPlanOverride = {
+  weeklyFirstTouchTarget: number;
+  dailyFirstTouchTarget: number;
 };
 
 function requireEnv(name: string) {
@@ -76,6 +90,51 @@ function readText(filePath: string) {
 
 function plan(firstTouchTarget: number, followUpTarget: number, uniqueCompaniesTarget: number) {
   return { firstTouchTarget, followUpTarget, uniqueCompaniesTarget };
+}
+
+function parseCsv(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+    if (quoted) {
+      if (char === '"' && next === '"') {
+        field += '"';
+        i += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') quoted = true;
+    else if (char === ",") {
+      row.push(field);
+      field = "";
+    } else if (char === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else if (char !== "\r") {
+      field += char;
+    }
+  }
+
+  if (field || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  const [header = [], ...body] = rows;
+  return body
+    .filter((item) => item.length === header.length)
+    .map((item) => Object.fromEntries(header.map((key, index) => [key, item[index] || ""])) as CsvRow);
 }
 
 function isMissingPlaybookPlanColumnError(error: { message?: string; code?: string } | null) {
@@ -117,27 +176,69 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function loadCurrentWeekOverrides() {
+  const planPath = path.join(
+    salesRoot,
+    "2026-05-11_15_week_new_companies_plan",
+    "03_lists",
+    "week_allocation_2026-05-11_15.csv",
+  );
+
+  if (!fs.existsSync(planPath)) return new Map<string, WeekPlanOverride>();
+
+  const rows = parseCsv(readText(planPath));
+  const targetDate = "2026-05-11";
+  const bucket = new Map<string, WeekPlanOverride>();
+
+  for (const row of rows) {
+    const objectName = canonicalObjectTitle(String(row.object || ""));
+    const newCompanies = Number(String(row.new_companies || "0"));
+    if (!objectName || !Number.isFinite(newCompanies) || newCompanies <= 0) continue;
+
+    const current = bucket.get(objectName) || {
+      weeklyFirstTouchTarget: 0,
+      dailyFirstTouchTarget: 0,
+    };
+    current.weeklyFirstTouchTarget += newCompanies;
+    if (String(row.date || "") === targetDate) current.dailyFirstTouchTarget += newCompanies;
+    bucket.set(objectName, current);
+  }
+
+  return bucket;
+}
+
 function buildSeeds(): PlaybookSeed[] {
   const emailTemplates = path.join(salesRoot, "2026-04-21_four_objects", "01_templates", "email_templates.md");
   const followupTemplates = path.join(salesRoot, "2026-04-21_four_objects", "01_templates", "followup_templates.md");
   const planTemplates = path.join(salesRoot, "2026-04-29_30_followup_plan", "01_templates");
   const april28Templates = path.join(salesRoot, "2026-04-28_plan", "01_templates");
+  const may11Templates = path.join(salesRoot, "2026-05-11_15_week_new_companies_plan", "01_templates");
+  const premisesTemplates = path.join(salesRoot, "2026-05-07_premises_7_objects_200", "01_templates");
 
   const abbakumovo = parseSectionTemplate(emailTemplates, "Abbakumovo Land");
-  const pushkino = parseSingleTemplate(path.join(salesRoot, "2026-04-27_pushkino_yaroslavskoe_194k1", "01_templates", "first_touch.md"));
-  const michurinskiy = parseSingleTemplate(path.join(salesRoot, "2026-04-27_michurinskiy_3", "01_templates", "first_touch.md"));
+  const pushkino = parseSingleTemplate(path.join(salesRoot, "2026-05-04_weekly_7_objects", "01_templates", "pushkino_first_touch.md"));
+  const michurinskiy = parseSingleTemplate(path.join(salesRoot, "2026-05-04_weekly_7_objects", "01_templates", "michurinskiy_first_touch.md"));
   const suvorovskaya = parseSingleTemplate(path.join(salesRoot, "2026-04-24_suvorovskaya_1_52k1", "01_templates", "first_touch.md"));
   const stupino = parseSectionTemplate(emailTemplates, "Stupino Land");
   const mozhaysk = parseSectionTemplate(emailTemplates, "Mozhaysk Land");
   const year1905 = parseSingleTemplate(path.join(salesRoot, "2026-04-29_moskva_1905_goda_4s1", "01_templates", "first_touch_1905_goda.md"));
+  const dmitriya = parseSingleTemplate(path.join(premisesTemplates, "dmitriya_ulyanova_24_first_touch.md"));
+  const novyyArbat = parseSingleTemplate(path.join(premisesTemplates, "novyy_arbat_5_first_touch.md"));
+  const prokshino = parseSingleTemplate(path.join(premisesTemplates, "biznes_kvartal_prokshino_first_touch.md"));
+  const griga = parseSingleTemplate(path.join(premisesTemplates, "edvarda_griga_first_touch.md"));
+  const desnareche = parseSingleTemplate(path.join(premisesTemplates, "desnareche_first_touch.md"));
+  const dzen = parseSingleTemplate(path.join(premisesTemplates, "dzen_kvartaly_first_touch.md"));
+  const ispanskie = parseSingleTemplate(path.join(premisesTemplates, "ispanskie_kvartaly_first_touch.md"));
+  const polyanka = parseSingleTemplate(path.join(may11Templates, "polyanka_42_first_touch.md"));
 
   const abbakumovoFollowup = parseSectionTemplate(followupTemplates, "Abbakumovo Follow-up 1");
   const pushkinoFollowup = parseSingleTemplate(path.join(planTemplates, "pushkino_followup_1.md"));
   const michurinskiyFollowup = parseSingleTemplate(path.join(planTemplates, "michurinskiy_followup_1.md"));
   const stupinoFollowup = parseSingleTemplate(path.join(planTemplates, "staraya_sitnya_followup_1.md"));
   const suvorovskayaFollowup = parseSingleTemplate(path.join(april28Templates, "suvorovskaya_followup_1.md"));
+  const weekOverrides = loadCurrentWeekOverrides();
 
-  return [
+  const seeds: PlaybookSeed[] = [
     {
       objectName: "Аббакумово",
       subject: abbakumovo.subject,
@@ -201,77 +302,93 @@ function buildSeeds(): PlaybookSeed[] {
     },
     {
       objectName: "Дмитрия Ульянова, 24",
-      subject: "Дмитрия Ульянова, 24: малый street retail у метро Академическая",
-      letterBody: "Ликвидный малый street retail напротив выхода из метро Академическая. Подходит под кофе to-go, табак, связь, оптику и быстрые сервисные форматы. Рабочий объект для быстрого брокерского дистрибута.",
-      pingOne: "Возвращаюсь по объекту на Дмитрия Ульянова, 24. Если у вас есть активный запрос на малый ликвидный street retail у метро, это один из самых быстрых лотов в текущем пуле.",
+      subject: dmitriya.subject,
+      letterBody: dmitriya.body,
+      pingOne: "Возвращаюсь по помещению на Дмитрия Ульянова, 24. Если вам нужен небольшой понятный формат у метро, это один из самых удобных вариантов для быстрого запуска.",
       monthlyPlan: plan(90, 40, 70),
       weeklyPlan: plan(22, 10, 17),
       dailyPlan: plan(5, 2, 4),
     },
     {
       objectName: "Новый Арбат, 5",
-      subject: "Новый Арбат, 5: крупный флагманский лот в центре Москвы",
-      letterBody: "Крупный флагманский лот на Новом Арбате под restaurant group, flagship retail, showroom или private clinic. Длинный цикл сделки и адресная продажа через senior brokers и named brands.",
-      pingOne: "Повторно направляю Новый Арбат, 5. Объект нужно вести адресно по флагманским брендам и крупным пользователям, а не через массовую рассылку.",
+      subject: novyyArbat.subject,
+      letterBody: novyyArbat.body,
+      pingOne: "Возвращаюсь по Новому Арбату, 5. Это объект для крупных брендов, ресторанных групп и покупки под собственное размещение.",
       monthlyPlan: plan(35, 18, 28),
       weeklyPlan: plan(9, 4, 7),
       dailyPlan: plan(2, 1, 1),
     },
     {
       objectName: "Бизнес-квартал Прокшино",
-      subject: "Бизнес-квартал Прокшино: офисы класса A и ритейл у метро",
-      letterBody: "Современный офисный продукт класса A в Прокшино. Основной buyer path: owner-user, HQ-relocation, private office, office investor и корпоративные брокеры.",
-      pingOne: "Возвращаюсь по Бизнес-кварталу Прокшино. Если у вас есть клиент на покупку офиса для собственного размещения или ликвидный офисный актив у метро, это объект для приоритетного просмотра.",
+      subject: prokshino.subject,
+      letterBody: prokshino.body,
+      pingOne: "Возвращаюсь по Бизнес-кварталу Прокшино. Если вам нужен офис для своей компании или понятный объект у метро, его стоит посмотреть в числе первых.",
       monthlyPlan: plan(70, 30, 52),
       weeklyPlan: plan(18, 8, 14),
       dailyPlan: plan(4, 2, 3),
     },
     {
       objectName: "Офисный центр на ул. Эдварда Грига",
-      subject: "Офисный центр на ул. Эдварда Грига: здание целиком под owner-user",
-      letterBody: "Отдельно стоящий офисный центр под клинику, школу, HQ или private campus use. Точечный продукт под конкретного пользователя, а не массовый рынок.",
-      pingOne: "Повторно возвращаюсь по офисному центру на ул. Эдварда Грига. Если у вас есть реальный user на здание целиком, это формат для адресной проработки.",
+      subject: griga.subject,
+      letterBody: griga.body,
+      pingOne: "Возвращаюсь по офисному центру на ул. Эдварда Грига. Если вам нужно здание целиком под свои задачи, это хороший вариант для предметного разговора.",
       monthlyPlan: plan(55, 25, 42),
       weeklyPlan: plan(14, 6, 11),
       dailyPlan: plan(3, 1, 2),
     },
     {
       objectName: "Деснаречье, торговое помещение",
-      subject: "Деснаречье: ранний вход в жилой ритейл Новой Москвы",
-      letterBody: "Стартовый торговый лот в растущем жилом районе. Подходит под частного инвестора, франчайзи и local retail operators. Ключевая логика: ранний вход и рост потребительского кластера.",
-      pingOne: "Возвращаюсь по лоту в Деснаречье. Для инвестора, который смотрит ранний вход в жилой ритейл с умеренным бюджетом, это один из самых рабочих форматов в текущем пуле.",
+      subject: desnareche.subject,
+      letterBody: desnareche.body,
+      pingOne: "Возвращаюсь по помещению в Деснаречье. Для тех, кто ищет ранний вход в жилой район с понятным бюджетом, это один из самых удобных вариантов.",
       monthlyPlan: plan(100, 40, 78),
       weeklyPlan: plan(25, 10, 20),
       dailyPlan: plan(5, 2, 4),
     },
     {
       objectName: "Дзен-кварталы, торговое помещение",
-      subject: "Дзен-кварталы: торговое помещение для частного инвестора и сетевого сервиса",
-      letterBody: "Торговый лот в жилом массиве с невысоким входным билетом. Основные сценарии: частный инвестор под арендатора, семейный капитал, франчайзи, кофейня, аптека или сервис у дома.",
-      pingOne: "Повторно направляю лот в Дзен-кварталах. Это удобный объект для частного инвестора и небольшого сервисного формата в Новой Москве.",
+      subject: dzen.subject,
+      letterBody: dzen.body,
+      pingOne: "Возвращаюсь по помещению в Дзен-кварталах. Это удобный вариант для частного покупателя и небольшого формата услуг в Новой Москве.",
       monthlyPlan: plan(110, 45, 85),
       weeklyPlan: plan(28, 12, 22),
       dailyPlan: plan(6, 2, 5),
     },
     {
       objectName: "Испанские кварталы, коммерческий лот",
-      subject: "Испанские кварталы: готовый коммерческий лот в плотном жилом массиве",
-      letterBody: "Готовая коммерция в сформированном жилом районе с понятной логикой под сетевой сервис, продуктовый формат и частного инвестора в ГАБ/ритейл.",
-      pingOne: "Повторно направляю коммерческий лот в Испанских кварталах. Объект стоит показывать и инвесторам, и операторам с готовой tenant-логикой.",
+      subject: ispanskie.subject,
+      letterBody: ispanskie.body,
+      pingOne: "Возвращаюсь по помещению в Испанских кварталах. Его стоит смотреть и тем, кто сам открывает точку, и тем, кто покупает под аренду.",
       monthlyPlan: plan(75, 35, 58),
       weeklyPlan: plan(19, 9, 15),
       dailyPlan: plan(4, 2, 3),
     },
     {
       objectName: "Большая Полянка, 42 стр. 2",
-      subject: "Большая Полянка, 42 стр. 2: ОСЗ 2 094 м² под клинику, HQ или статусный городской актив",
-      letterBody: "Отдельно стоящее здание 2 094 м² на Большой Полянке, в контуре Садового кольца. Основной buyer path: частная клиника, owner-user, boutique HQ, family office и private investor под репозиционирование центрального актива.",
-      pingOne: "Возвращаюсь по Большой Полянке, 42 стр. 2. Это адресный объект для медицинского пользователя, owner-user и инвестора, которому нужен центр, отдельное здание и сценарий адаптации под свой формат.",
+      subject: polyanka.subject,
+      letterBody: polyanka.body,
+      pingOne: "Возвращаюсь по Большой Полянке, 42 стр. 2. Это объект для клиники, представительства компании или покупки под собственное размещение в центре Москвы.",
       monthlyPlan: plan(42, 22, 32),
       weeklyPlan: plan(11, 6, 8),
       dailyPlan: plan(2, 1, 1),
     },
   ];
+
+  return seeds.map((seed) => {
+    const override = weekOverrides.get(canonicalObjectTitle(seed.objectName));
+    if (!override) return seed;
+
+    return {
+      ...seed,
+      monthlyPlan: plan(
+        Math.max(seed.monthlyPlan.firstTouchTarget, override.weeklyFirstTouchTarget),
+        seed.monthlyPlan.followUpTarget,
+        Math.max(seed.monthlyPlan.uniqueCompaniesTarget, override.weeklyFirstTouchTarget),
+      ),
+      weeklyPlan: plan(override.weeklyFirstTouchTarget, 0, override.weeklyFirstTouchTarget),
+      dailyPlan: plan(override.dailyFirstTouchTarget, 0, override.dailyFirstTouchTarget),
+    };
+  });
 }
 
 async function upsertPlaybook(db: SupabaseClient, seed: PlaybookSeed) {
