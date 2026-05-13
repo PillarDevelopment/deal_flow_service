@@ -1,4 +1,8 @@
 import type { FastifyInstance } from "fastify";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+const DEAL_WORKER_ROOT = path.resolve(process.cwd(), "..", "deal_worker");
 
 export async function brokerUiRoutes(server: FastifyInstance) {
   server.get("/broker", async (_request, reply) => {
@@ -7,6 +11,51 @@ export async function brokerUiRoutes(server: FastifyInstance) {
 
   server.get("/broker/object/:propertyId", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(renderBrokerPage());
+  });
+
+  server.get<{ Params: { slug: string; kind: string } }>("/brief-media/:slug/:kind", async (request, reply) => {
+    const kind = request.params.kind === "plan" ? "plan" : request.params.kind === "main" ? "main" : null;
+    if (!kind) return reply.status(404).send({ error: "Файл не найден" });
+
+    const { data: property, error } = await server.db
+      .from("properties")
+      .select("attributes")
+      .eq("external_id", request.params.slug)
+      .maybeSingle();
+    if (error) return reply.status(500).send({ error: error.message });
+
+    const media = property?.attributes?.media as Record<string, unknown> | undefined;
+    const fallbackMedia: Record<string, Record<string, string>> = {
+      ramenskoe: {
+        main_path: "assets/objects/Land/Ramenskoe/main.jpeg",
+        plan_path: "assets/objects/Land/Ramenskoe/main2.jpg",
+      },
+    };
+    const relativePath = String(
+      media?.[`${kind}_path`] || fallbackMedia[request.params.slug]?.[`${kind}_path`] || "",
+    );
+    if (!relativePath || relativePath.includes("..")) {
+      return reply.status(404).send({ error: "Файл не найден" });
+    }
+
+    const fullPath = path.resolve(DEAL_WORKER_ROOT, relativePath);
+    if (!fullPath.startsWith(DEAL_WORKER_ROOT)) {
+      return reply.status(404).send({ error: "Файл не найден" });
+    }
+
+    try {
+      const buffer = await readFile(fullPath);
+      const ext = path.extname(relativePath).toLowerCase();
+      const type =
+        ext === ".png"
+          ? "image/png"
+          : ext === ".webp"
+            ? "image/webp"
+            : "image/jpeg";
+      return reply.type(type).send(buffer);
+    } catch {
+      return reply.status(404).send({ error: "Файл не найден" });
+    }
   });
 }
 
